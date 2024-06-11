@@ -1,0 +1,3 @@
+[workspace]
+members = [ "buffer_sizing", "cyclic_scheduler","mdsdf", "milp_formulation"]
+resolver = "2"

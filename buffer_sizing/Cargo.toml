@@ -1,0 +1,20 @@
+[package]
+name = "buffer_sizing"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "buffer_sizing"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+grb = "2.0.0"
+mdsdf = { version = "0.1.0", path = "../mdsdf" }
+milp_formulation = { version = "0.1.0", path = "../milp_formulation" }
+ndarray = "0.15.6"
+num = "0.4.3"
+
+[dependencies.pyo3]
+version = "0.21.2"
+features = ["extension-module"]
+

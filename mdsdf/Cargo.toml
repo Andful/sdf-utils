@@ -1,0 +1,16 @@
+[package]
+name = "mdsdf"
+version = "0.1.0"
+edition = "2018"
+
+[lib]
+name = "mdsdf"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+ndarray = "0.15.6"
+num = "0.4.3"
+
+[dependencies.pyo3]
+version = "0.21.2"
+features = ["extension-module"]

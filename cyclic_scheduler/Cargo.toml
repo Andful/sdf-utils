@@ -1,0 +1,22 @@
+[package]
+name = "cyclic-scheduler"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "cyclic_scheduler"
+crate-type = ["cdylib"]
+
+[dependencies]
+grb = "2.0.0"
+itertools = "0.13.0"
+mdsdf = { version = "0.1.0", path = "../mdsdf" }
+buffer_sizing = { version = "0.1.0", path = "../buffer_sizing" }
+milp_formulation = { version = "0.1.0", path = "../milp_formulation" }
+
+[dependencies.pyo3]
+version = "0.21.2"
+features = ["extension-module"]
+
+[build-dependencies]
+npm_rs = "1.0.0"
