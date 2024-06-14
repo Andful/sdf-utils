@@ -18,3 +18,6 @@ num = "0.4.3"
 version = "0.21.2"
 features = ["extension-module"]
 
+[dev-dependencies]
+anyhow = "1.0.86"
+sdf3_xml_parser = { path = "../sdf3_xml_parser" }

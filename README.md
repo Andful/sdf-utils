@@ -5,3 +5,4 @@ Few SDF miscellaneous stuff:
 * `milp_formulation` - a MILP that optimizes throughput, but can be augmented with other constraints
 * `buffer_sizing` - augmentation of the MILP to enable constrained buffers
 * `cyclic_scheduling` - augmentation of the MILP to enable cyclic scheduling
+* `sdf3_xml_parser` - sdf3 parser

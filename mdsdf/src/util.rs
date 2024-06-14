@@ -7,7 +7,6 @@ use num::integer::lcm;
 use num::Rational32;
 use num::Zero;
 
-
 fn rref<I>(mut out: Array2<Rational32>) -> Array2<Rational32> {
     let mut pivot = 0;
     let (rows, cols) = out.raw_dim().into_pattern();
@@ -84,11 +83,10 @@ pub fn repetition_vector(topology_matrix: &Array2<i32>) -> Option<Array1<usize>>
 
 pub struct BoundedIterator<'a, const N: usize> {
     index: Vector<N, usize>,
-    bound: Cow<'a, Vector<N, usize>>
+    bound: Cow<'a, Vector<N, usize>>,
 }
 
-impl <const N: usize> BoundedIterator<'_, N> {
-
+impl<const N: usize> BoundedIterator<'_, N> {
     fn increment(&mut self) {
         for d in 0..N {
             if self.index[d] + 1 == self.bound[d] {
@@ -100,9 +98,9 @@ impl <const N: usize> BoundedIterator<'_, N> {
         }
         self.index[0] = self.bound[0]; // Mark that the iterator is done
     }
-} 
+}
 
-impl <const N: usize> Iterator for BoundedIterator<'_, N> {
+impl<const N: usize> Iterator for BoundedIterator<'_, N> {
     type Item = Vector<N, usize>;
 
     fn next(&mut self) -> Option<Self::Item> {
@@ -113,12 +111,14 @@ impl <const N: usize> Iterator for BoundedIterator<'_, N> {
         self.increment();
         Some(result)
     }
-} 
+}
 
-pub fn bounded_iterator<const N: usize>(bound: Cow<'_, Vector<N, usize>>) -> BoundedIterator<'_, N> {
+pub fn bounded_iterator<const N: usize>(
+    bound: Cow<'_, Vector<N, usize>>,
+) -> BoundedIterator<'_, N> {
     BoundedIterator {
         index: Vector::<N, usize>::default(),
-        bound
+        bound,
     }
 }
 

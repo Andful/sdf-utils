@@ -2,23 +2,27 @@ mod py;
 pub mod util;
 pub mod vector;
 
-use std::borrow::Cow;
-use vector::Vector;
 use ndarray::Array2;
+use std::borrow::Cow;
 use util::{bounded_iterator, repetition_vector, BoundedIterator};
+use vector::Vector;
 
 #[derive(Debug, Clone)]
-pub struct Channel<const N: usize, E> {
+pub struct Channel<const N: usize> {
     pub production_rate: Vector<N, usize>,
     pub consumption_rate: Vector<N, usize>,
     pub source: usize,
     pub target: usize,
-    pub initial_tokens: Vector<N, E>,
+    pub initial_tokens: Vector<N, isize>,
 }
+
+#[derive(Clone, Copy)]
+pub struct ChannelIndex(usize);
+
 #[derive(Debug, Clone, Default)]
 pub struct Mdsdf<const N: usize> {
     n_actors: usize,
-    channels: Vec<Channel<N, isize>>,
+    channels: Vec<Channel<N>>,
 }
 
 impl<const N: usize> Mdsdf<N> {
@@ -29,14 +33,21 @@ impl<const N: usize> Mdsdf<N> {
         }
     }
 
-    pub fn add_channel(&mut self, channel: Channel<N, isize>) {
+    pub fn add_channel(&mut self, channel: Channel<N>) -> ChannelIndex {
         debug_assert!(channel.source < self.n_actors);
         debug_assert!(channel.target < self.n_actors);
-        self.channels.push(channel)
+        let c = ChannelIndex(self.channels.len());
+        self.channels.push(channel);
+        c
+    }
+
+    pub fn get_channel(&self, ChannelIndex(i): ChannelIndex) -> &Channel<N> {
+        &self.channels[i]
     }
 
     pub fn hsdf(&self) -> Hsdf<N> {
-        let mut rv: Box<[Vector<N, usize>]> = vec![Vector::<N, usize>::default(); self.n_actors].into_boxed_slice();
+        let mut rv: Box<[Vector<N, usize>]> =
+            vec![Vector::<N, usize>::default(); self.n_actors].into_boxed_slice();
         for d in 0..N {
             let mut topology_matrix = Array2::<i32>::zeros((self.channels.len(), self.n_actors));
             for (
@@ -94,7 +105,7 @@ impl<const N: usize> Hsdf<'_, N> {
         }
     }
 
-    pub fn channels(&self) -> HsdfChannels<'_, N, impl Iterator<Item = Channel<N, isize>> + '_> {
+    pub fn channels(&self) -> HsdfChannels<'_, N, impl Iterator<Item = Channel<N>> + '_> {
         let channels = self.mdsdf.channels.iter().map(Clone::clone);
         HsdfChannels::new(self, channels)
     }
@@ -137,9 +148,9 @@ pub struct HsdfChannel<const N: usize> {
 
 pub struct HsdfChannels<'a, const N: usize, Channels>
 where
-    Channels: Iterator<Item = Channel<N, isize>>,
+    Channels: Iterator<Item = Channel<N>>,
 {
-    pub current_channel: Option<Channel<N, isize>>,
+    pub current_channel: Option<Channel<N>>,
     pub channels: Channels,
     pub hsdf: &'a Hsdf<'a, N>,
     pub bounded_iterator: BoundedIterator<'static, N>,
@@ -147,14 +158,14 @@ where
 
 impl<'a, const N: usize, Channels> HsdfChannels<'a, N, Channels>
 where
-    Channels: Iterator<Item = Channel<N, isize>>,
+    Channels: Iterator<Item = Channel<N>>,
 {
     fn new(hsdf: &'a Hsdf<'a, N>, channels: Channels) -> Self {
         let mut result = Self {
             current_channel: None,
             channels,
             hsdf,
-            bounded_iterator: bounded_iterator(Cow::Owned(Default::default())),//TODO
+            bounded_iterator: bounded_iterator(Cow::Owned(Default::default())), //TODO
         };
         result.iterate_channel();
         result
@@ -163,7 +174,10 @@ where
     fn iterate_channel(&mut self) {
         self.current_channel = self.channels.next();
         self.bounded_iterator = if let Some(current_channel) = &self.current_channel {
-             bounded_iterator(Cow::Owned::<Vector<N, usize>>(self.hsdf.repetition_vector[current_channel.source] * current_channel.production_rate))
+            bounded_iterator(Cow::Owned::<Vector<N, usize>>(
+                self.hsdf.repetition_vector[current_channel.source]
+                    * current_channel.production_rate,
+            ))
         } else {
             return;
         }
@@ -172,7 +186,7 @@ where
 
 impl<'a, const N: usize, Channels> Iterator for HsdfChannels<'a, N, Channels>
 where
-    Channels: Iterator<Item = Channel<N, isize>>,
+    Channels: Iterator<Item = Channel<N>>,
 {
     type Item = HsdfChannel<N>;
 
@@ -187,20 +201,16 @@ where
             let tokens = index.clone() + current_channel.initial_tokens;
             let production_rate = current_channel.production_rate.map(|e| e as isize);
             let consumption_rate = current_channel.consumption_rate.map(|e| e as isize);
-            let rotation = self.hsdf.repetition_vector[current_channel.target].map(|e| e as isize) * consumption_rate.clone();
-            let target_index = (tokens.clone().modulo(rotation.clone())).flooring_div(consumption_rate);
+            let rotation = self.hsdf.repetition_vector[current_channel.target].map(|e| e as isize)
+                * consumption_rate.clone();
+            let target_index =
+                (tokens.clone().modulo(rotation.clone())).flooring_div(consumption_rate);
             let source_index = index.flooring_div(production_rate);
             let initial_tokens = tokens.flooring_div(rotation);
 
             return Some(HsdfChannel {
-                source: (
-                    current_channel.source,
-                    source_index.map(|e| e as usize),
-                ),
-                target: (
-                    current_channel.target,
-                    target_index.map(|e| e as usize),
-                ),
+                source: (current_channel.source, source_index.map(|e| e as usize)),
+                target: (current_channel.target, target_index.map(|e| e as usize)),
                 initial_tokens,
             });
         }

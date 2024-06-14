@@ -1,3 +1,3 @@
 [workspace]
-members = [ "buffer_sizing", "cyclic_scheduler","mdsdf", "milp_formulation"]
+members = [ "buffer_sizing", "cyclic_scheduler","mdsdf", "milp_formulation", "sdf3_xml_parser"]
 resolver = "2"

@@ -17,7 +17,9 @@ pub struct MilpFormulation<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>,
     pub name: Name,
 }
 
-impl<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>> MilpFormulation<'a, N, ExecutionTime, Name> {
+impl<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>>
+    MilpFormulation<'a, N, ExecutionTime, Name>
+{
     pub fn new(
         hsdf: Cow<'a, Hsdf<'a, N>>,
         mut execution_time: ExecutionTime,
@@ -63,7 +65,7 @@ impl<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>> MilpF
             u,
             throughputs,
             name,
-            execution_time
+            execution_time,
         })
     }
 }
@@ -132,8 +134,12 @@ mod tests {
                 }
                 .to_string()
             },
-        ).unwrap();
-        milp_formulation.model.set_objective(milp_formulation.throughputs[0], grb::ModelSense::Maximize).unwrap();
+        )
+        .unwrap();
+        milp_formulation
+            .model
+            .set_objective(milp_formulation.throughputs[0], grb::ModelSense::Maximize)
+            .unwrap();
         milp_formulation.model.optimize().unwrap();
     }
 }

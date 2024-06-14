@@ -1,4 +1,4 @@
-use mdsdf::{vector::Vector, Channel};
+use mdsdf::{vector::Vector, Channel, ChannelIndex};
 use pyo3::{prelude::*, types::PyDict};
 
 #[derive(Clone, Default)]
@@ -37,7 +37,7 @@ struct RingBuffer {
 #[pyclass]
 struct CyclicScheduler {
     tasks: Vec<Task>,
-    channels: Vec<(Channel<2, isize>, Option<RingBufferIndex>)>,
+    channels: Vec<(Channel<2>, Option<RingBufferIndex>)>,
     ring_buffers: Vec<RingBuffer>,
     memories: Vec<Memory>,
 }
@@ -110,9 +110,15 @@ impl CyclicScheduler {
         use grb::prelude::*;
         use std::borrow::Cow;
         let mut sdf = mdsdf::Mdsdf::<2>::new(self.tasks.len());
-        for (c, _) in self.channels.iter() {
-            sdf.add_channel(c.clone());
-        }
+
+        let buffered_channels = self
+            .channels
+            .iter()
+            .filter_map(|(c, b)| {
+                let ci = sdf.add_channel(c.clone());
+                b.clone().map(|rbi| (ci, rbi))
+            }).collect::<Vec<_>>();
+
         let hsdf = sdf.hsdf();
         let mut milp = milp_formulation::MilpFormulation::new(
             Cow::Borrowed(&hsdf),
@@ -167,48 +173,48 @@ impl CyclicScheduler {
         let mut buffered_sdf = buffer_sizing::BufferedMrsdf::new(&mut milp);
 
         for (
-            Channel {
-                production_rate,
-                consumption_rate,
-                source,
-                target,
-                initial_tokens,
-            },
+            channel_index,
             RingBufferIndex(i),
-        ) in self
-            .channels
-            .iter()
-            .filter_map(|(a, b)| b.clone().map(|e| (a, e)))
+        ) in buffered_channels
         {
             buffered_sdf
-                .add_buffer(Channel {
-                    production_rate: *consumption_rate,
-                    consumption_rate: *production_rate,
-                    source: *target,
-                    target: *source,
-                    initial_tokens: ring_buffer[i].clone() - initial_tokens.map(|e| e as f64),
-                })
+                .add_buffer(channel_index, ring_buffer[i].clone().into())
                 .unwrap()
         }
 
-        crate::cyclic_scheduler(&mut buffered_sdf.milp, |(i, _)| self.tasks[i].processor, 0).unwrap();
+        crate::cyclic_scheduler(&mut buffered_sdf.milp, |(i, _)| self.tasks[i].processor, 0)
+            .unwrap();
 
         //let buffered_sdf = buffer_sizing::BufferedMrsdf::new(&mut milp);
 
         buffered_sdf.milp.model.write("solution.lp").unwrap();
-        buffered_sdf.milp.model.set_objective(buffered_sdf.milp.throughputs[0], grb::ModelSense::Maximize).unwrap();
+        buffered_sdf
+            .milp
+            .model
+            .set_objective(buffered_sdf.milp.throughputs[0], grb::ModelSense::Maximize)
+            .unwrap();
         buffered_sdf.milp.model.optimize().unwrap();
         buffered_sdf.milp.model.write("solution.sol").unwrap();
-        let throughput = buffered_sdf.milp.model.get_obj_attr(attr::X, &buffered_sdf.milp.throughputs[0]).unwrap();
-        CyclicSchedulerSolution{
+        let throughput = buffered_sdf
+            .milp
+            .model
+            .get_obj_attr(attr::X, &buffered_sdf.milp.throughputs[0])
+            .unwrap();
+        CyclicSchedulerSolution {
             throughput,
             tasks: buffered_sdf
                 .milp
                 .u
                 .iter()
                 .map(|(a, b)| {
-                    let start_time = buffered_sdf.milp.model.get_obj_attr(attr::X, &b).unwrap()/throughput;
-                    let Task { name, color, execution_time, processor } = self.tasks[a.0].clone();
+                    let start_time =
+                        buffered_sdf.milp.model.get_obj_attr(attr::X, &b).unwrap() / throughput;
+                    let Task {
+                        name,
+                        color,
+                        execution_time,
+                        processor,
+                    } = self.tasks[a.0].clone();
                     TaskSolution {
                         start_time,
                         execution_time: execution_time as f64,
@@ -216,7 +222,8 @@ impl CyclicScheduler {
                         color,
                         processor,
                     }
-                }).collect() ,
+                })
+                .collect(),
         }
     }
 }
@@ -235,7 +242,8 @@ impl ToPyObject for TaskSolution {
     fn to_object(&self, py: Python<'_>) -> PyObject {
         let data = PyDict::new_bound(py);
         data.set_item("start_time", self.start_time).unwrap();
-        data.set_item("execution_time", self.execution_time).unwrap();
+        data.set_item("execution_time", self.execution_time)
+            .unwrap();
         data.set_item("processor", self.processor).unwrap();
         data.set_item("name", self.name.clone()).unwrap();
         data.set_item("color", self.color.clone()).unwrap();
@@ -252,7 +260,7 @@ struct CyclicSchedulerSolution {
 
 #[pymethods]
 impl CyclicSchedulerSolution {
-    fn plot<'py>(&self,  py: Python<'py>) -> PyResult<()> {
+    fn plot<'py>(&self, py: Python<'py>) -> PyResult<()> {
         let notebookjs = py.import_bound("notebookjs")?;
         let execute_js = notebookjs.getattr("execute_js")?;
 
@@ -260,7 +268,11 @@ impl CyclicSchedulerSolution {
 
         data.set_item("tasks", self.tasks.clone()).unwrap();
         data.set_item("throughput", self.throughput).unwrap();
-        execute_js.call1((include_str!("../plotter/dist/bundle.js"), "cyclic_scheduler_plotter.main", data))?;
+        execute_js.call1((
+            include_str!("../plotter/dist/bundle.js"),
+            "cyclic_scheduler_plotter.main",
+            data,
+        ))?;
         Ok(())
     }
 }

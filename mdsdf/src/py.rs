@@ -1,6 +1,6 @@
-use std::borrow::Cow;
-use pyo3::prelude::*;
 use crate::{Channel, Hsdf, HsdfChannel, Mdsdf};
+use pyo3::prelude::*;
+use std::borrow::Cow;
 
 #[pyclass(name = "Sdf")]
 #[derive(Clone)]
@@ -47,7 +47,7 @@ impl PySdf {
             production_rate: [production_rate].into(),
             consumption_rate: [consumption_rate].into(),
             initial_tokens: [initial_tokens].into(),
-        })
+        });
     }
 
     fn dot(&self) -> String {
@@ -66,8 +66,11 @@ impl PySdf {
                      target,
                      initial_tokens,
                  }| {
-                    format!("  L{source} -> L{target} [taillabel={} label={} headlabel={}]\n", production_rate[0], initial_tokens[0], consumption_rate[0])
-                        .into()
+                    format!(
+                        "  L{source} -> L{target} [taillabel={} label={} headlabel={}]\n",
+                        production_rate[0], initial_tokens[0], consumption_rate[0]
+                    )
+                    .into()
                 },
             ))
             .chain(std::iter::once(Cow::Borrowed("}\n")))
@@ -84,42 +87,52 @@ impl PySdf {
 
 #[pyclass(name = "Hsdf")]
 #[derive(Clone)]
-struct PyHsdf{
+struct PyHsdf {
     names: Vec<String>,
-    hsdf: Hsdf<'static, 1>
+    hsdf: Hsdf<'static, 1>,
 }
 
 #[pymethods]
 impl PyHsdf {
     fn actors(&self) -> Vec<(String, (usize,))> {
-        self.hsdf.actors()
+        self.hsdf
+            .actors()
             .map(|(i, j)| (self.names[i].clone(), (j[0],)))
             .collect()
     }
 
     fn channels(&self) -> Vec<((String, (usize,)), (String, (usize,)), (isize,))> {
-        self.hsdf.channels()
-            .map(|HsdfChannel { source: (s, si), target: (t, ti), initial_tokens: d }| ((self.names[s].clone(), (si[0],)), (self.names[t].clone(), (ti[0],)), (d[0],)))
+        self.hsdf
+            .channels()
+            .map(
+                |HsdfChannel {
+                     source: (s, si),
+                     target: (t, ti),
+                     initial_tokens: d,
+                 }| {
+                    (
+                        (self.names[s].clone(), (si[0],)),
+                        (self.names[t].clone(), (ti[0],)),
+                        (d[0],),
+                    )
+                },
+            )
             .collect()
     }
 
     fn dot(&self) -> String {
         std::iter::once(Cow::Borrowed("digraph {\n"))
-            .chain(
-                self.hsdf.actors()
-                    .map(|(i, j)| {
-                        let name = &self.names[i];
-                        format!("  L{i}_{0} [label=\"{name}({0})\"]\n", j[0]).into()
-                    }),
-            )
+            .chain(self.hsdf.actors().map(|(i, j)| {
+                let name = &self.names[i];
+                format!("  L{i}_{0} [label=\"{name}({0})\"]\n", j[0]).into()
+            }))
             .chain(self.hsdf.channels().map(
                 |HsdfChannel {
                      source: (si, sj),
                      target: (ti, tj),
                      initial_tokens: d,
                  }| {
-                    format!("  L{si}_{} -> L{ti}_{} [label={}]\n", sj[0], tj[0], d[0])
-                        .into()
+                    format!("  L{si}_{} -> L{ti}_{} [label={}]\n", sj[0], tj[0], d[0]).into()
                 },
             ))
             .chain(std::iter::once(Cow::Borrowed("}\n")))
@@ -172,7 +185,7 @@ impl PySdf2D {
             production_rate: production_rate.into(),
             consumption_rate: consumption_rate.into(),
             initial_tokens: initial_tokens.into(),
-        })
+        });
     }
 
     fn dot(&self) -> String {
@@ -212,47 +225,83 @@ impl PySdf2D {
 
 #[pyclass(name = "Hsdf2D")]
 #[derive(Clone)]
-struct PyHsdf2D{
+struct PyHsdf2D {
     names: Vec<String>,
-    hsdf: Hsdf<'static, 2>
+    hsdf: Hsdf<'static, 2>,
 }
 
 #[pymethods]
 impl PyHsdf2D {
     fn actors(&self) -> Vec<(String, (usize, usize))> {
-        self.hsdf.actors()
+        self.hsdf
+            .actors()
             .map(|(i, j)| (self.names[i].clone(), (j[0], j[1])))
             .collect()
     }
 
-    fn channels(&self) -> Vec<((String, (usize, usize)), (String, (usize, usize)), (isize, isize))> {
-        self.hsdf.channels()
-            .map(|HsdfChannel { source: (s, si), target: (t, ti), initial_tokens }| ((self.names[s].clone(), (si[0], si[1])), (self.names[t].clone(), (ti[0], ti[1])), (initial_tokens[0], initial_tokens[1])))
+    fn channels(
+        &self,
+    ) -> Vec<(
+        (String, (usize, usize)),
+        (String, (usize, usize)),
+        (isize, isize),
+    )> {
+        self.hsdf
+            .channels()
+            .map(
+                |HsdfChannel {
+                     source: (s, si),
+                     target: (t, ti),
+                     initial_tokens,
+                 }| {
+                    (
+                        (self.names[s].clone(), (si[0], si[1])),
+                        (self.names[t].clone(), (ti[0], ti[1])),
+                        (initial_tokens[0], initial_tokens[1]),
+                    )
+                },
+            )
             .collect()
     }
 
     fn dot(&self) -> String {
         std::iter::once(Cow::Borrowed("digraph {\n"))
-            .chain(
-                self.hsdf.actors()
-                    .map(|(i, j)| {
-                        let name = &self.names[i];
-                        let indicies = j.iter().map(ToString::to_string).collect::<Vec<_>>().join("_");
-                        let label = j.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
-                        format!("  L{i}_{indicies} [label=\"{name}({label})\"]\n").into()
-                    }),
-            )
+            .chain(self.hsdf.actors().map(|(i, j)| {
+                let name = &self.names[i];
+                let indicies = j
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join("_");
+                let label = j
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect::<Vec<_>>()
+                    .join(",");
+                format!("  L{i}_{indicies} [label=\"{name}({label})\"]\n").into()
+            }))
             .chain(self.hsdf.channels().map(
                 |HsdfChannel {
                      source: (si, sj),
                      target: (ti, tj),
                      initial_tokens: d,
                  }| {
-                    let sj = sj.iter().map(ToString::to_string).collect::<Vec<_>>().join("_");
-                    let tj = tj.iter().map(ToString::to_string).collect::<Vec<_>>().join("_");
-                    let d = d.iter().map(ToString::to_string).collect::<Vec<_>>().join(",");
-                    format!("  L{si}_{sj} -> L{ti}_{tj} [label=\"({d})\"]\n")
-                        .into()
+                    let sj = sj
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    let tj = tj
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join("_");
+                    let d = d
+                        .iter()
+                        .map(ToString::to_string)
+                        .collect::<Vec<_>>()
+                        .join(",");
+                    format!("  L{si}_{sj} -> L{ti}_{tj} [label=\"({d})\"]\n").into()
                 },
             ))
             .chain(std::iter::once(Cow::Borrowed("}\n")))

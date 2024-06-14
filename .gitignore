@@ -1,2 +1,7 @@
 /target
 .env
+*.xml
+*.lp
+*.sol
+.ipynb_checkpoints
+*.log

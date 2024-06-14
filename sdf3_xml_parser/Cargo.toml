@@ -1,0 +1,12 @@
+[package]
+name = "sdf3_xml_parser"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+grb = "2.0.0"
+serde-xml-rs = "0.6.0"
+mdsdf = { version = "0.1.0", path = "../mdsdf" }
+milp_formulation = { version = "0.1.0", path = "../milp_formulation" }
+buffer_sizing = { version = "0.1.0", path = "../buffer_sizing" }
+serde = { version = "1.0.203", features = ["derive"] }
