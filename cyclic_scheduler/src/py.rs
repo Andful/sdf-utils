@@ -1,4 +1,4 @@
-use mdsdf::{vector::Vector, Channel, ChannelIndex};
+use mdsdf::{vector::Vector, Channel};
 use pyo3::{prelude::*, types::PyDict};
 
 #[derive(Clone, Default)]
@@ -11,7 +11,6 @@ struct Task {
 
 #[derive(Clone, Default)]
 struct Memory {
-    cost: f64,
     size: usize,
 }
 
@@ -96,10 +95,9 @@ impl CyclicScheduler {
         RingBufferIndex(result)
     }
 
-    fn add_memory(&mut self, cost: f64, memory_size: usize) -> MemoryIndex {
+    fn add_memory(&mut self, memory_size: usize) -> MemoryIndex {
         let result = self.memories.len();
         self.memories.push(Memory {
-            cost,
             size: memory_size,
         });
         MemoryIndex(result)

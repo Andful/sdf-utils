@@ -54,3 +54,30 @@ fn main() -> anyhow::Result<()> {
 
     Ok(())
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn test() -> grb::Result<()> {
+        use grb::prelude::*;
+
+        let mut model = Model::new("model")?;
+
+        let x = add_ctsvar!(model, name: "x", bounds: 0..)?;
+        let y = add_ctsvar!(model, name: "y", bounds: 0..)?;
+
+        model.add_constr("c", c!(x + y <= 10))?;
+
+        model.set_objective(2*x, ModelSense::Maximize)?;
+        model.optimize()?;
+
+        println!("x:{}\ty:{}", model.get_obj_attr(attr::X, &x)?, model.get_obj_attr(attr::X, &y)?);
+
+        model.set_objective(y, ModelSense::Maximize)?;
+        model.optimize()?;
+
+        println!("x:{}\ty:{}", model.get_obj_attr(attr::X, &x)?, model.get_obj_attr(attr::X, &y)?);
+
+        Ok(())
+    }
+}
