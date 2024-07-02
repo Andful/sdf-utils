@@ -8,16 +8,16 @@ name = "buffer_sizing"
 crate-type = ["cdylib", "lib"]
 
 [dependencies]
-grb = "2.0.0"
-mdsdf = { version = "0.1.0", path = "../mdsdf" }
-milp_formulation = { version = "0.1.0", path = "../milp_formulation" }
-ndarray = "0.15.6"
-num = "0.4.3"
+grb = "2.*"
+mdsdf = { path = "../mdsdf" }
+milp_formulation = { path = "../milp_formulation" }
+ndarray = "0.15.*"
+num = "0.4.*"
 
 [dependencies.pyo3]
-version = "0.21.2"
+version = "0.21.*"
 features = ["extension-module"]
 
 [dev-dependencies]
-anyhow = "1.0.86"
+anyhow = "1.*"
 sdf3_xml_parser = { path = "../sdf3_xml_parser" }

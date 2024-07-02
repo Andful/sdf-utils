@@ -1,0 +1,24 @@
+- name : default 
+  core_allocation: [0]
+    
+- name : conv 
+  core_allocation: [0]
+    
+- name : gemm 
+  core_allocation: [0]
+    
+- name : pool 
+  core_allocation: [4]
+    
+- name : maxpool 
+  core_allocation: [4]
+    
+- name : averagepool 
+  core_allocation: [4]
+    
+- name : globalaveragepool 
+  core_allocation: [4]
+    
+- name : add 
+  core_allocation: [5]
+    

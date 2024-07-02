@@ -1,4 +1,5 @@
 use mdsdf::{vector::Vector, Channel};
+use milp_formulation::{ExecutionTimeT, NameT};
 use pyo3::{prelude::*, types::PyDict};
 
 #[derive(Clone, Default)]
@@ -97,9 +98,7 @@ impl CyclicScheduler {
 
     fn add_memory(&mut self, memory_size: usize) -> MemoryIndex {
         let result = self.memories.len();
-        self.memories.push(Memory {
-            size: memory_size,
-        });
+        self.memories.push(Memory { size: memory_size });
         MemoryIndex(result)
     }
 
@@ -115,13 +114,26 @@ impl CyclicScheduler {
             .filter_map(|(c, b)| {
                 let ci = sdf.add_channel(c.clone());
                 b.clone().map(|rbi| (ci, rbi))
-            }).collect::<Vec<_>>();
+            })
+            .collect::<Vec<_>>();
 
         let hsdf = sdf.hsdf();
+        struct ExecutionTime<'a>(&'a Vec<Task>);
+        impl ExecutionTimeT<2> for ExecutionTime<'_> {
+            fn execution_time(&self, (i, _): (usize, Vector<2, usize>)) -> usize {
+                self.0[i].execution_time
+            }
+        }
+        struct Name<'a>(&'a Vec<Task>);
+        impl NameT<2> for Name<'_> {
+            fn name(&self, (i, _): (usize, Vector<2, usize>)) -> String {
+                self.0[i].name.clone()
+            }
+        }
         let mut milp = milp_formulation::MilpFormulation::new(
             Cow::Borrowed(&hsdf),
-            |(i, _)| self.tasks[i].execution_time,
-            |(i, _)| self.tasks[i].name.clone(),
+            ExecutionTime(&self.tasks),
+            Name(&self.tasks),
         )
         .unwrap();
 
@@ -170,13 +182,13 @@ impl CyclicScheduler {
 
         let mut buffered_sdf = buffer_sizing::BufferedMrsdf::new(&mut milp);
 
-        for (
-            channel_index,
-            RingBufferIndex(i),
-        ) in buffered_channels
-        {
+        for (channel_index, RingBufferIndex(i)) in buffered_channels {
             buffered_sdf
-                .add_buffer(channel_index, ring_buffer[i].clone().into())
+                .add_buffer(
+                    channel_index,
+                    ring_buffer[i].clone().into(),
+                    &format!("ring_buffer_{i}"),
+                )
                 .unwrap()
         }
 

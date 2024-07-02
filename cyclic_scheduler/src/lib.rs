@@ -28,8 +28,8 @@ pub fn cyclic_scheduler<const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: 
         for (t1, t2) in tasks.iter().tuple_combinations() {
             let task1 = milp.u.get(t1).unwrap();
             let task2 = milp.u.get(t2).unwrap();
-            let e1 = (milp.execution_time)(*t1);
-            let e2 = (milp.execution_time)(*t2);
+            let e1 = milp.execution_time.execution_time(*t1);
+            let e2 = milp.execution_time.execution_time(*t2);
             let k = add_intvar!(model, bounds: ..)?;
             model.add_constr(
                 "",
@@ -43,7 +43,7 @@ pub fn cyclic_scheduler<const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: 
         if tasks.len() == 1 {
             let t = tasks.first().unwrap();
             let task = milp.u.get(t).unwrap();
-            let e = (milp.execution_time)(*t);
+            let e = milp.execution_time.execution_time(*t);
             let throughput = milp.throughputs[dimension];
             model.add_constr(
                 "",
@@ -53,7 +53,7 @@ pub fn cyclic_scheduler<const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: 
         let cycle_time = tasks
             .iter()
             .map(Clone::clone)
-            .map(&mut milp.execution_time)
+            .map(|actor| milp.execution_time.execution_time(actor))
             .sum::<usize>() as f64;
         model.add_constr("", c!(cycle_time * throughput.clone() <= 1))?;
     }
@@ -71,9 +71,6 @@ mod test {
 
     #[test]
     fn test() {
-        let names: BTreeMap<usize, &str> = ["a", "b", "c"].iter().map(|e| *e).enumerate().collect();
-        let execution_times: BTreeMap<usize, usize> =
-            [1, 2, 2].iter().map(Clone::clone).enumerate().collect();
         let mut sdf = Mdsdf::new(3);
         //Self loops
         sdf.add_channel(Channel {
@@ -118,14 +115,21 @@ mod test {
         //sdf.add_channel(Channel { production_rate: [3].into(), consumption_rate: [2].into(), source: 1, target: 0, initial_tokens: [5].into() });
 
         let hsdf = sdf.hsdf();
-        let execution_time = Box::new({
-            let execution_times = execution_times.clone();
-            move |(s, _)| *execution_times.get(&s).unwrap()
-        });
-        let name = Box::new(move |(s, si): (usize, Vector<1, usize>)| {
-            format!("{}({})", names.get(&s).unwrap().to_string(), si[0])
-        });
-        let mut milp = MilpFormulation::new(Cow::Borrowed(&hsdf), execution_time, name).unwrap();
+        struct Name;
+        impl NameT<1> for Name {
+            fn name(&self, (s, si): (usize, Vector<1, usize>)) -> String {
+                let n = ["a", "b", "c"][s];
+                format!("{}({})", n, si[0])
+            }
+        }
+
+        struct ExecutionTime;
+        impl ExecutionTimeT<1> for ExecutionTime {
+            fn execution_time(&self, (s, _): (usize, Vector<1, usize>)) -> usize {
+                [1, 2, 2][s]
+            }
+        }
+        let mut milp = MilpFormulation::new(Cow::Borrowed(&hsdf), ExecutionTime, Name).unwrap();
         cyclic_scheduler(&mut milp, |(i, _)| [0, 1, 0][i], 0).unwrap();
 
         let model = &mut milp.model;

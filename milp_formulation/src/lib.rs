@@ -4,9 +4,13 @@
 use mdsdf::{vector::Vector, Hsdf, HsdfChannel};
 use std::{borrow::Cow, collections::BTreeMap};
 
-pub trait ExecutionTimeT<const N: usize> = FnMut((usize, Vector<N, usize>)) -> usize;
+pub trait ExecutionTimeT<const N: usize> {
+    fn execution_time(&self, actor: (usize, Vector<N, usize>)) -> usize;
+}
 
-pub trait NameT<const N: usize> = FnMut((usize, Vector<N, usize>)) -> String;
+pub trait NameT<const N: usize> {
+    fn name(&self, actor: (usize, Vector<N, usize>)) -> String;
+}
 
 pub struct MilpFormulation<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>> {
     pub hsdf: Cow<'a, Hsdf<'a, N>>,
@@ -22,8 +26,8 @@ impl<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>>
 {
     pub fn new(
         hsdf: Cow<'a, Hsdf<'a, N>>,
-        mut execution_time: ExecutionTime,
-        mut name: Name,
+        execution_time: ExecutionTime,
+        name: Name,
     ) -> grb::Result<Self> {
         use grb::prelude::*;
 
@@ -35,7 +39,7 @@ impl<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>>
 
         let u: BTreeMap<(usize, Vector<N, usize>), Var> = hsdf
             .actors()
-            .map(|a| add_ctsvar!(model, name: &name(a), bounds: 0.0..).map(|v| (a, v)))
+            .map(|a| add_ctsvar!(model, name: &name.name(a), bounds: 0.0..).map(|v| (a, v)))
             .try_collect()?;
 
         for HsdfChannel {
@@ -49,11 +53,11 @@ impl<'a, const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>>
             for i in 0..N {
                 let u_source = u_source.clone();
                 let u_target = u_target.clone();
-                let e = execution_time(source);
+                let e = execution_time.execution_time(source);
                 let throughput = throughputs[i].clone();
                 let initial_tokens = initial_tokens[i] as f64;
                 model.add_constr(
-                    &format!("dependency_{}_{}", name(source), name(target)),
+                    &format!("dependency_{}_{}", name.name(source), name.name(target)),
                     c!(u_target >= u_source + e * throughput - initial_tokens),
                 )?;
             }
@@ -116,16 +120,9 @@ mod tests {
             initial_tokens: [1].into(),
         });
 
-        let hsdf = sdf.hsdf();
-        let mut milp_formulation = MilpFormulation::new(
-            Cow::Borrowed(&hsdf),
-            |(a, _)| match a {
-                0 => 1,
-                1 => 2,
-                2 => 2,
-                _ => unreachable!(),
-            },
-            |(a, _)| {
+        struct Name;
+        impl NameT<1> for Name {
+            fn name(&self, (a, _): (usize, Vector<1, usize>)) -> String {
                 match a {
                     0 => "a",
                     1 => "b",
@@ -133,9 +130,24 @@ mod tests {
                     _ => unreachable!(),
                 }
                 .to_string()
-            },
-        )
-        .unwrap();
+            }
+        }
+
+        struct ExecutionTime;
+        impl ExecutionTimeT<1> for ExecutionTime {
+            fn execution_time(&self, (a, _): (usize, Vector<1, usize>)) -> usize {
+                match a {
+                    0 => 1,
+                    1 => 2,
+                    2 => 2,
+                    _ => unreachable!(),
+                }
+            }
+        }
+
+        let hsdf = sdf.hsdf();
+        let mut milp_formulation =
+            MilpFormulation::new(Cow::Borrowed(&hsdf), ExecutionTime, Name).unwrap();
         milp_formulation
             .model
             .set_objective(milp_formulation.throughputs[0], grb::ModelSense::Maximize)

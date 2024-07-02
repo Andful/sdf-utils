@@ -5,3 +5,5 @@
 *.sol
 .ipynb_checkpoints
 *.log
+__pycache__
+*.so

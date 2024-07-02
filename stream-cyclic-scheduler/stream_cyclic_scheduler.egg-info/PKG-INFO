@@ -1,0 +1,11 @@
+Metadata-Version: 2.1
+Name: stream_cyclic_scheduler
+Version: 0.1.0
+Author-email: Andrea Nardi <buongiorno19972@gmail.com>
+Requires-Dist: networkx>=3
+Requires-Dist: stream-dse
+Requires-Dist: notebook>=7
+Requires-Dist: matplotlib==3.6
+Requires-Dist: plotly
+Requires-Dist: pandas
+Requires-Dist: cerberus

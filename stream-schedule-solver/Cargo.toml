@@ -1,0 +1,23 @@
+[package]
+name = "stream_schedule_solver"
+version = "0.1.0"
+edition = "2018"
+
+[lib]
+name = "stream_schedule_solver"
+crate-type = ["cdylib", "lib"]
+
+[dependencies]
+grb = "2.*"
+ndarray = "0.15.*"
+num = "0.4.*"
+mdsdf = { path = "../mdsdf"}
+cyclic-scheduler = { path = "../cyclic_scheduler"}
+buffer_sizing = { path = "../buffer_sizing"}
+milp_formulation = { path = "../milp_formulation" }
+ordered-float = "4.2.1"
+topological-sort = "0.2.2"
+
+[dependencies.pyo3]
+version = "0.21.2"
+features = ["extension-module"]

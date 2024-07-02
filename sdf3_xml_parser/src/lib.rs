@@ -3,6 +3,8 @@
 use std::collections::BTreeMap;
 
 use buffer_sizing::BufferedMrsdf;
+use mdsdf::ChannelIndex;
+use milp_formulation::{ExecutionTimeT, NameT};
 use serde::{Deserialize, Serialize};
 
 #[derive(Debug, Serialize, Deserialize)]
@@ -96,6 +98,19 @@ struct ExecutionTime {
 #[derive(Debug, Serialize, Deserialize)]
 struct ChannelProperties {}
 
+struct ET(BTreeMap<usize, usize>);
+impl ExecutionTimeT<1> for ET {
+    fn execution_time(&self, actor: (usize, mdsdf::vector::Vector<1, usize>)) -> usize {
+        *self.0.get(&actor.0).unwrap()
+    }
+}
+struct N(BTreeMap<usize, String>);
+impl NameT<1> for N {
+    fn name(&self, (i, j): (usize, mdsdf::vector::Vector<1, usize>)) -> String {
+        format!("{}({})", self.0.get(&i).unwrap(), j[0])
+    }
+}
+
 pub fn parse(
     s: &str,
 ) -> (
@@ -141,14 +156,21 @@ pub fn parse(
         .collect::<Vec<&Channel>>();
     let ports: BTreeMap<(&str, &str), &Port> = actors
         .iter()
-        .flat_map(|a| a.ports.iter().map(|p| ((a.name.as_str(), p.name.as_str()), p)))
+        .flat_map(|a| {
+            a.ports
+                .iter()
+                .map(|p| ((a.name.as_str(), p.name.as_str()), p))
+        })
         .collect();
     let actor_indicies: BTreeMap<&str, usize> = actors
         .iter()
         .enumerate()
         .map(|(i, a)| (a.name.as_str(), i))
         .collect();
-    let names = actor_indicies.iter().map(|(n, i)| (*i, n.to_string())).collect::<BTreeMap<_, _>>();
+    let names = actor_indicies
+        .iter()
+        .map(|(n, i)| (*i, n.to_string()))
+        .collect::<BTreeMap<_, _>>();
     let mut result = mdsdf::Mdsdf::<1>::new(actors.len());
 
     let execution_times: BTreeMap<usize, usize> = sdf_properties
@@ -174,7 +196,7 @@ pub fn parse(
             )
         })
         .collect();
-    
+
     let mut channels_to_buffer = Vec::new();
     for Channel {
         name,
@@ -187,16 +209,32 @@ pub fn parse(
     {
         if let Some(initial_tokens) = initial_tokens {
             result.add_channel(mdsdf::Channel {
-                production_rate: [ports.get(&(src_actor.as_str(), src_port.as_str())).unwrap().rate].into(),
-                consumption_rate: [ports.get(&(dst_actor.as_str(), dst_port.as_str())).unwrap().rate].into(),
+                production_rate: [ports
+                    .get(&(src_actor.as_str(), src_port.as_str()))
+                    .unwrap()
+                    .rate]
+                .into(),
+                consumption_rate: [ports
+                    .get(&(dst_actor.as_str(), dst_port.as_str()))
+                    .unwrap()
+                    .rate]
+                .into(),
                 source: *actor_indicies.get(src_actor.as_str()).unwrap(),
                 target: *actor_indicies.get(dst_actor.as_str()).unwrap(),
                 initial_tokens: [*initial_tokens].into(),
             });
         } else {
             let channel = mdsdf::Channel {
-                production_rate: [ports.get(&(src_actor.as_str(), src_port.as_str())).unwrap().rate].into(),
-                consumption_rate: [ports.get(&(dst_actor.as_str(), dst_port.as_str())).unwrap().rate].into(),
+                production_rate: [ports
+                    .get(&(src_actor.as_str(), src_port.as_str()))
+                    .unwrap()
+                    .rate]
+                .into(),
+                consumption_rate: [ports
+                    .get(&(dst_actor.as_str(), dst_port.as_str()))
+                    .unwrap()
+                    .rate]
+                .into(),
                 source: *actor_indicies.get(src_actor.as_str()).unwrap(),
                 target: *actor_indicies.get(dst_actor.as_str()).unwrap(),
                 initial_tokens: [0isize].into(),
@@ -207,20 +245,28 @@ pub fn parse(
 
     let mut milp = milp_formulation::MilpFormulation::new(
         Cow::Owned(result.clone().into_hsdf().into()),
-        {
-            let execution_times = execution_times.clone();
-            move |(i, _)| *execution_times.get(&i).unwrap()
-        },
-        move |(i, j)| format!("{}({})", names.get(&i).unwrap(), j[0]),
+        ET(execution_times.clone()),
+        N(names),
     )
     .unwrap();
 
     let model = &mut milp.model;
-    let buffers = channels_to_buffer.iter().map(|(_, name)| grb::add_ctsvar!(model, name: name, bounds: 0..)).try_collect::<Vec<_>>().unwrap();
+    let buffers = channels_to_buffer
+        .iter()
+        .map(|(_, name)| grb::add_ctsvar!(model, name: name, bounds: 0..))
+        .try_collect::<Vec<_>>()
+        .unwrap();
 
     let mut buffer_sizing = BufferedMrsdf::new(&mut milp);
     for ((channel, _), buffer_size) in channels_to_buffer.iter().zip(buffers.iter()) {
-        buffer_sizing.add_buffer(*channel, [buffer_size.into()].into()).unwrap();
+        let i = channel.0;
+        buffer_sizing
+            .add_buffer(
+                *channel,
+                [buffer_size.into()].into(),
+                &format!("buffer_{i}"),
+            )
+            .unwrap();
     }
 
     (milp, execution_times, buffers)

@@ -4,9 +4,9 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-grb = "2.0.0"
-serde-xml-rs = "0.6.0"
-mdsdf = { version = "0.1.0", path = "../mdsdf" }
-milp_formulation = { version = "0.1.0", path = "../milp_formulation" }
-buffer_sizing = { version = "0.1.0", path = "../buffer_sizing" }
-serde = { version = "1.0.203", features = ["derive"] }
+grb = "2.*"
+serde-xml-rs = "0.6.*"
+mdsdf = { path = "../mdsdf" }
+milp_formulation = { path = "../milp_formulation" }
+buffer_sizing = { path = "../buffer_sizing" }
+serde = { version = "1.*", features = ["derive"] }

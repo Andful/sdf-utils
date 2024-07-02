@@ -1,0 +1,7 @@
+networkx>=3
+stream-dse
+notebook>=7
+matplotlib==3.6
+plotly
+pandas
+cerberus

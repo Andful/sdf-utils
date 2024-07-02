@@ -4,5 +4,5 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-grb = "2.0.0"
-mdsdf = { version = "0.1.0", path = "../mdsdf" }
+grb = "2.*"
+mdsdf = { path = "../mdsdf" }
