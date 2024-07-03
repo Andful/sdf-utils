@@ -6,7 +6,7 @@ from stream.classes.workload.computation_node import ComputationNode
 from zigzag.cost_model.cost_model import CostModelEvaluation
 from zigzag.hardware.architecture.Core import Core
 from zigzag.workload.Workload import Workload
-from zigzag.datatypes import MemoryOperand, LayerOperand
+from zigzag.datatypes import MemoryOperand, LayerOperand, LayerDim
 from stream.utils import get_too_large_operands
 from mdsdf import Sdf2D
 from stream_schedule_solver import Optimizer
@@ -52,11 +52,13 @@ Processor = CoreInfo | ChannelInfo
 
 @dataclass
 class StackSchedule:
+    raster_direction: Literal["X" , "Y"]
     cycle_time: int
     executions: dict[Processor, list[any]]
     layers: list[str]
     def toJSON(self):
         return {
+            "raster_direction": self.raster_direction,
             "cycle_time": self.cycle_time,
             "layers": self.layers,
             "execution": list(map(lambda i: {
@@ -120,6 +122,7 @@ class CyclicFitnessEvaluator(FitnessEvaluator):
     def get_stack_fitness(self, sdf: "Sdf2D[ComputationNode]"):
         sdf: "Sdf2D[Process]" = sdf
         layers: list[str] = list(map(lambda cn: cn.name, sdf.actors()))
+        sources_cn = sdf.sources()
         for (cn1, cn2) in sdf.channels():
             if cn1.chosen_core_allocation != cn2.chosen_core_allocation:
                 tensor = cn1.operand_tensors[LayerOperand('O')]
@@ -213,13 +216,23 @@ class CyclicFitnessEvaluator(FitnessEvaluator):
             if isinstance(p, ComputationNode):
                 return p.name
             elif isinstance(p, Communication):
-                return p.links[0].get_name_for_schedule_plot()
+                return f"{"DRAM" if p.source=="DRAM" else p.source.name}->{"DRAM" if p.target=="DRAM" else p.target.name}"
             
         def execution_time(p: Process):
             if isinstance(p, ComputationNode):
                 return p.get_runtime()
             elif isinstance(p, Communication):
                 return p.latency
+            
+        def padding(p: Process):
+            if isinstance(p, ComputationNode):
+                if p in sources_cn:
+                    return [0, 0]
+                node_attr = p.extract_node_attr()
+                window = self.tile_window[p.name]
+                return [node_attr.padding[LayerDim('IX')][0] if window[0] is not None else 0, node_attr.padding[LayerDim('IY')][1] if window[1] is not None else 0]
+            elif isinstance(p, Communication):
+                return [0, 0]
         
         def token_sizes(p: Process):
             if isinstance(p, ComputationNode):
@@ -251,6 +264,7 @@ class CyclicFitnessEvaluator(FitnessEvaluator):
             name,
             execution_time,
             token_sizes,
+            padding,
             memory_id,
             processor,
             sdf
@@ -265,6 +279,7 @@ class CyclicFitnessEvaluator(FitnessEvaluator):
                 s = execution.get(p, [])
                 execution[p] = s
                 s.append({
+                    "type": "compute",
                     "layer": cn.name,
                     "repetition-instance": r,
                     "repetition": start_information.repetition(),
@@ -291,9 +306,12 @@ class CyclicFitnessEvaluator(FitnessEvaluator):
                     number_execution = cn.source.number_execution
 
                 s.append({
+                    "type": "transfer",
                     "layer-operator": "O" if cn.source != "DRAM" else "I",
-                    "layer": cn.source.name if cn.source != "DRAM" else cn.target.name,
-                    "repetition": r,
+                    "layer-source": cn.source.name if cn.source != "DRAM" else None,
+                    "layer-target": cn.target.name if cn.target != "DRAM" else None,
+                    "repetition-instance": r,
+                    "repetition": start_information.repetition(),
                     "after": start_information.start_after(),
                     "start_time": start_information.start_time(),
                     "execution_time": cn.latency,
@@ -302,6 +320,7 @@ class CyclicFitnessEvaluator(FitnessEvaluator):
                     "buffer": start_information.buffer_size(),
                 })
         stack_schedule = StackSchedule(
+            raster_direction=self.optimization_direction,
             cycle_time=cycle_time,
             executions=execution,
             layers=layers

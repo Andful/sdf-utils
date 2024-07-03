@@ -3,12 +3,15 @@ from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.workload.computation_node import ComputationNode
 from zigzag.cost_model.cost_model import CostModelEvaluation
-from zigzag.datatypes import LayerOperand
+from zigzag.datatypes import LayerOperand, LayerDim
 from zigzag.hardware.architecture.Core import Core
 from zigzag.utils import pickle_deepcopy
-
+import heapq
 from stream.utils import get_too_large_operands
 from zigzag.workload.Workload import Workload
+from AcceleratorVirtualMachine import AcceleratorVirtualMachine
+import numpy as np
+from typing import cast
 
 
 class ReplayFitnessEvaluator(FitnessEvaluator):
@@ -19,21 +22,36 @@ class ReplayFitnessEvaluator(FitnessEvaluator):
         workload: Workload | None,
         accelerator: Accelerator | None,
         node_hw_performances: dict[ComputationNode, dict[Core, CostModelEvaluation]] | None,
-        layer_groups_flexible,
-        operands_to_prefetch: list[str],
+        schedule_json: str,
+        tile_window: dict[str, (int | None, int | None)]
     ) -> None:
         super().__init__(workload, accelerator, node_hw_performances)
 
         self.weights = (-1.0, -1.0)
         self.metrics = ["energy", "latency"]
+        self.workload = workload
+        self.tile_window = tile_window
 
-        self.layer_groups_flexible = layer_groups_flexible
-        self.operands_to_prefetch = operands_to_prefetch
+        computation_nodes: dict[tuple[str, int, int], ComputationNode] = dict()
+
+        for n in self.workload.nodes():
+            n = cast(ComputationNode, n)
+            index = np.array([n.loop_ranges.get(LayerDim('OX'))[0], n.loop_ranges.get(LayerDim('OY'))[0]])
+            window = self.tile_window[n.name]
+            window = np.array([window[0] or index[0], window[1] or index[1]])
+
+            computation_nodes[(n.name, tuple(index//window))] = n
         
+        self.computation_nodes = computation_nodes
+
         import json
 
-        with open("schedule.json", "r") as f:
-            schedule = json.load(f)
+        with open(schedule_json, "r") as f:
+            self.schedule = json.load(f)
+
+        self.vm = AcceleratorVirtualMachine(self.accelerator, self.workload)
+
+        print(self.computation_nodes)
 
     def get_fitness(self, core_allocations: list[int], return_scme: bool = False):
         """Get the fitness of the given core_allocations
@@ -42,13 +60,69 @@ class ReplayFitnessEvaluator(FitnessEvaluator):
             core_allocations (list): core_allocations
         """
         self.set_node_core_allocations(core_allocations)
+        print(self.schedule)
         scme = StreamCostModelEvaluation(
             pickle_deepcopy(self.workload),
             pickle_deepcopy(self.accelerator),
-            self.operands_to_prefetch,
-            self.scheduling_order,
+            [],
+            None,
         )
-        scme.run()
+        offchip = self.accelerator.get_core(self.accelerator.offchip_core_id)
+        offset = 0
+        for stack in self.schedule["stack_schedules"]:
+            cycle_time: int = stack["cycle_time"]
+            layers: set[str] = set(stack["layers"])
+            offset = self.vm.load_weights(layers, offset)
+            raster_direction = 0 if stack["raster_direction"] == "X" else 1
+            other_direction = 1 - raster_direction
+            tasks = []
+            for exececution in stack["execution"]:
+                tasks += exececution["tasks"]
+
+            tasks = sorted(tasks, key=lambda x: x["start_time"])
+            number_of_execution = np.max([np.array(task["after"]) + np.array(task["number_executions"]) for task in tasks], axis=0)
+            from tqdm import tqdm
+            for i in tqdm(range(number_of_execution[other_direction])):
+                for j in range(number_of_execution[raster_direction]):
+                    t = cycle_time*j + cycle_time*i*number_of_execution[raster_direction]
+                    index = np.array([i, j]) if other_direction == 0 else np.array([j, i])
+                    for task in tasks:
+                        time = t + task["start_time"]
+                        print(f"time: {time} i: {i} j:{j}")
+                        after = np.array(task["after"])
+                        number_execution = np.array(task["number_executions"])
+                        before = after + number_execution
+                        if np.all(after <= index) and np.all(index < before):
+                            index = index*np.array(task["repetition"]) + np.array(task["repetition-instance"])
+                            if task["type"] == "transfer":
+                                if task["layer-operator"] == "I":
+                                    cn = self.computation_nodes[(task["layer-target"], tuple(index))]
+                                    core = self.accelerator.get_core(cn.chosen_core_allocation)
+                                    self.vm.copy_tensor(offchip, core, cn.operand_tensors[LayerOperand("I")], time, task["execution_time"])
+                                    offset += task["execution_time"]
+                                if task["layer-operator"] == "O":
+                                    print(f"transfering O")
+                                    cn1 = self.computation_nodes[(task["layer-source"], tuple(index))]
+                                    core1 = self.accelerator.get_core(cn1.chosen_core_allocation)
+                                    if task["layer-target"] == None:
+                                        core2 = offchip
+                                    else:
+                                        cn2 = self.computation_nodes[(task["layer-target"], tuple(index))]
+                                        core2 = self.accelerator.get_core(cn2.chosen_core_allocation) 
+
+                                    self.vm.copy_tensor(core1, core2, cn1.operand_tensors[LayerOperand("O")], time, task["execution_time"])
+                                    offset += task["execution_time"]
+                            elif task["type"] == "compute":
+                                cn = self.computation_nodes[(task["layer"], tuple(index))]
+                                core = self.accelerator.get_core(cn.chosen_core_allocation)
+                                self.vm.compute(core, cn, time, task["execution_time"], task["energy"])
+            
+                
+
+        
+
+        
+
         energy = scme.energy
         latency = scme.latency
         if not return_scme:

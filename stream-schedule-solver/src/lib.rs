@@ -89,6 +89,7 @@ impl MilpData {
         name_fn: Bound<'py, PyAny>,
         execution_time_fn: Bound<'py, PyAny>,
         token_size_fn: Bound<'py, PyAny>,
+        padding_fn: Bound<'py, PyAny>,
         memory_id_fn: Bound<'py, PyAny>,
         processor_fn: Bound<'py, PyAny>,
         sdf: &PySdf2D,
@@ -121,6 +122,12 @@ impl MilpData {
             .try_collect::<Vec<usize>>()
             .expect("\"processor\" function must return int");
 
+        let padding = id_map
+            .iter()
+            .map(|e| padding_fn.call((e,), None)?.extract())
+            .try_collect::<Vec<[usize; 2]>>()
+            .expect("\"processor\" function must return int");
+
         struct BufferInfo {
             core: usize,
             token_size: usize,
@@ -151,7 +158,7 @@ impl MilpData {
 
         let result = NoSend::new({
             use grb::prelude::*;
-            let sdf = sdf.sdf.clone();
+            let sdf: Mdsdf<2> = sdf.sdf.clone();
             move || {
                 let mut milp = MilpFormulation::<'static, 2, ExecutionTime, Name>::new(
                     Cow::Owned(sdf.into_hsdf()),
@@ -187,20 +194,27 @@ impl MilpData {
                                     production_rate,
                                     consumption_rate,
                                     initial_tokens,
+                                    target,
                                     ..
                                 } = channels[*i];
-                                let production_rate =
-                                    production_rate[optimization_direction.other_dimension()] as isize;
-                                let consumption_rate =
-                                    consumption_rate[optimization_direction.other_dimension()] as isize;
-                                let initial_tokens = initial_tokens[optimization_direction.other_dimension()] as isize;
+                                let production_rate = production_rate
+                                    [optimization_direction.other_dimension()]
+                                    as isize;
+                                let consumption_rate = consumption_rate
+                                    [optimization_direction.other_dimension()]
+                                    as isize;
+                                let initial_tokens = initial_tokens
+                                    [optimization_direction.other_dimension()]
+                                    as isize;
                                 let divisor = num::integer::gcd(production_rate, consumption_rate);
                                 consumption_rate - divisor + production_rate
                                     - (initial_tokens.div_floor(production_rate)) * production_rate
+                                    + padding[target][optimization_direction.other_dimension()] as isize
                             })
                             .chain(std::iter::once(0))
                             .max()
-                            .expect("This should not be none") as usize;
+                            .expect("This should not be none")
+                            as usize;
                         println!("minimum_buffer {} {}", &names[source], minimum_buffer);
                         let name = format!("{}_buffer_size", &names[source]);
                         let model = &mut buffered.milp.model;
@@ -210,15 +224,17 @@ impl MilpData {
                             + buffer_size.clone() * token_size * minimum_buffer;
 
                         for channel_index in out_channels {
+                            let target = buffered.milp.hsdf.mdsdf.channels[channel_index.0].target;
+
                             buffered
                                 .add_buffer(
                                     channel_index,
                                     match optimization_direction {
                                         OptimizationDirection::X => {
-                                            [Expr::from(buffer_size), minimum_buffer.into()]
+                                            [Expr::from(buffer_size - padding[target][0]), (minimum_buffer - padding[target][1]).into()]
                                         }
                                         OptimizationDirection::Y => {
-                                            [minimum_buffer.into(), buffer_size.into()]
+                                            [(minimum_buffer - padding[target][0]).into(), (buffer_size - padding[target][1]).into()]
                                         }
                                     }
                                     .into(),
@@ -289,6 +305,7 @@ impl Optimizer {
         name_fn: Bound<'py, PyAny>,
         execution_time_fn: Bound<'py, PyAny>,
         token_size_fn: Bound<'py, PyAny>,
+        padding_fn: Bound<'py, PyAny>,
         memory_id_fn: Bound<'py, PyAny>,
         processor_fn: Bound<'py, PyAny>,
         sdf: &PySdf2D,
@@ -302,6 +319,7 @@ impl Optimizer {
                 name_fn,
                 execution_time_fn,
                 token_size_fn,
+                padding_fn,
                 memory_id_fn,
                 processor_fn,
                 sdf,
@@ -322,7 +340,6 @@ impl Optimizer {
         usize,
     )> {
         use grb::prelude::*;
-        use topological_sort::{TopologicalSort, DependencyLink};
         let (throuput, start_information, memory) = self.milp.with(
             move |MilpData {
                       ref mut milp,
@@ -332,35 +349,13 @@ impl Optimizer {
                       processor,
                       ..
                   }| {
-                let mut start_information: BTreeMap<(usize, Vector<2, usize>), ExecutionInformation> =
-                    milp.u
-                        .iter()
-                        .map(|(k, _)| (k.clone(), Default::default()))
-                        .collect();
 
-                milp.model.write("test.lp").unwrap();
-
-                milp.model.set_objective(milp.throughputs[optimization_direction.other_dimension()], ModelSense::Maximize).unwrap();
-                milp.model.optimize().unwrap();
-
-                todo!();
-                
-                //Assumes acyclic graph
-                let sorted_actors: TopologicalSort<usize> = milp.hsdf.mdsdf.channels.iter().map(|Channel { source, target, .. }| DependencyLink {prec: *source, succ: *target}).collect();
-
-                for actor in sorted_actors.into_iter() {
-                    for HsdfChannel {source, target, initial_tokens} in milp.hsdf.out_channels_from_sdf_actor(actor) {
-                        let source_start_after = start_information.get_mut(&source).unwrap().start_after[optimization_direction.other_dimension()];
-                        let start = &mut start_information.get_mut(&target).unwrap().start_after[optimization_direction.other_dimension()];
-                        *start = (*start).max(source_start_after - initial_tokens[optimization_direction.other_dimension()]);
-                        println!("start: {} initial_tokens: {}, other_dimension: {}",start, initial_tokens[optimization_direction.other_dimension()], optimization_direction.other_dimension());
-                    }
-                }
-
-                milp.model.set_objective(milp.throughputs[optimization_direction.dimension()], ModelSense::Maximize).unwrap();
-                milp.model.optimize().unwrap();
-
-                cyclic_scheduler::cyclic_scheduler(milp, |(i, _)| processor[i], optimization_direction.dimension()).unwrap(); // Dimension 0 might not be the one to optimize
+                cyclic_scheduler::cyclic_scheduler(
+                    milp,
+                    |(i, _)| processor[i],
+                    optimization_direction.dimension(),
+                )
+                .unwrap();
 
                 milp.model
                     .set_objective(
@@ -368,22 +363,52 @@ impl Optimizer {
                         ModelSense::Maximize,
                     )
                     .unwrap();
+                
+                milp.model.write("f.lp").unwrap();
+
                 milp.model.optimize().unwrap();
 
-                let throuput = milp
+                let throuput1 = milp
                     .model
-                    .get_obj_attr(attr::X, &milp.throughputs[optimization_direction.dimension()])
+                    .get_obj_attr(
+                        attr::X,
+                        &milp.throughputs[optimization_direction.dimension()],
+                    )
                     .unwrap();
-                
-                milp.model.write("formulation.lp").unwrap();
 
-                assert!(throuput > 1e-7); //No deadlock
+                assert!(throuput1 > 1e-7); //No deadlock
                 assert_eq!(milp.model.status().unwrap(), Status::Optimal);
 
                 milp.model
                     .add_constr(
                         "t",
-                        c!(milp.throughputs[optimization_direction.dimension()] >= throuput),
+                        c!(milp.throughputs[optimization_direction.dimension()] >= throuput1),
+                    )
+                    .unwrap();
+
+                milp.model
+                    .set_objective(
+                        milp.throughputs[optimization_direction.other_dimension()],
+                        ModelSense::Maximize,
+                    )
+                    .unwrap();
+                milp.model.optimize().unwrap();
+
+                let throuput2 = milp
+                    .model
+                    .get_obj_attr(
+                        attr::X,
+                        &milp.throughputs[optimization_direction.other_dimension()],
+                    )
+                    .unwrap();
+
+                assert!(throuput2 > 1e-7); //No deadlock
+                assert_eq!(milp.model.status().unwrap(), Status::Optimal);
+
+                milp.model
+                    .add_constr(
+                        "t",
+                        c!(milp.throughputs[optimization_direction.other_dimension()] >= throuput2),
                     )
                     .unwrap();
 
@@ -401,27 +426,41 @@ impl Optimizer {
                     .unwrap();
                 milp.model.optimize().unwrap();
 
+                milp.model.write("f.sol").unwrap();
+
+                let mut execution_information = BTreeMap::new();
                 for ((k, v), buffer_size) in milp.u.iter().zip(buffers) {
-                    let buffer_size = buffer_size.map(|(variable_size, minimum_size)| {
-                        (milp.model.get_obj_attr(attr::X, &variable_size).unwrap().floor() as usize, minimum_size)
-                    }).map(|(variable_size, minimum_size)| {
-                        match optimization_direction {
-                            OptimizationDirection::X => [variable_size, minimum_size],
-                            OptimizationDirection::Y => [minimum_size, variable_size],
-                        }
-                    }).unwrap_or([0, 0]);
-                    let ExecutionInformation {
-                        start_time,
-                        start_after,
-                        repetition,
-                        buffer_size: buffer_size_to_assign
-                    } = start_information.get_mut(k).unwrap();
+                    let buffer_size = buffer_size
+                        .map(|(variable_size, minimum_size)| {
+                            (
+                                milp.model
+                                    .get_obj_attr(attr::X, &variable_size)
+                                    .unwrap()
+                                    .floor() as usize,
+                                minimum_size,
+                            )
+                        })
+                        .map(
+                            |(variable_size, minimum_size)| match optimization_direction {
+                                OptimizationDirection::X => [variable_size, minimum_size],
+                                OptimizationDirection::Y => [minimum_size, variable_size],
+                            },
+                        )
+                        .unwrap_or([0, 0]);
+
                     let u = milp.model.get_obj_attr(attr::X, v).unwrap();
-                    *start_time = ((u % 1.0) / throuput).round() as usize;
-                    start_after[optimization_direction.dimension()] = u.floor() as isize;
-                    repetition[0] = milp.hsdf.repetition_vector[k.0][0];
-                    repetition[1] = milp.hsdf.repetition_vector[k.0][1];
-                    *buffer_size_to_assign = buffer_size;
+                    execution_information.insert(*k, ExecutionInformation {
+                        start_time: ((u % 1.0) * throuput1).round() as usize,
+                        start_after: match optimization_direction {
+                            OptimizationDirection::X => [u.floor() as isize, u.floor() as isize],
+                            OptimizationDirection::Y => [u.floor() as isize, u.floor() as isize],
+                        },
+                        repetition: [
+                            milp.hsdf.repetition_vector[k.0][0],
+                            milp.hsdf.repetition_vector[k.0][1]
+                        ],
+                        buffer_size
+                    });
                 }
 
                 assert_eq!(milp.model.status().unwrap(), Status::Optimal);
@@ -434,11 +473,7 @@ impl Optimizer {
                 //model.write("formulation.lp").unwrap();
                 //model.write("formulation.sol").unwrap();
 
-                (
-                    throuput,
-                    start_information,
-                    memory,
-                )
+                (throuput1, execution_information, memory)
             },
         );
         let mut id_map = self
@@ -459,11 +494,7 @@ impl Optimizer {
 
         println!("Start Information: {:?}", start_information);
 
-        Ok((
-            cycle_time,
-            start_information,
-            memory.round() as usize,
-        ))
+        Ok((cycle_time, start_information, memory.round() as usize))
     }
 }
 

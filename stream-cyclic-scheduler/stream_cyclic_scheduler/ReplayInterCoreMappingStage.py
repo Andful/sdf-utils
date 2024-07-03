@@ -1,12 +1,14 @@
 from operator import attrgetter
 import logging
 
+import numpy as np
 from yaml import Node
-
+import numpy as np
+from typing import cast
 from stream.classes.cost_model.cost_model import StreamCostModelEvaluation
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from zigzag.cost_model.cost_model import CostModelEvaluation
-from zigzag.datatypes import LayerOperand
+from zigzag.datatypes import LayerOperand, LayerDim
 from zigzag.hardware.architecture.Core import Core
 from zigzag.stages.Stage import Stage, StageCallable
 from stream.classes.workload.computation_node import ComputationNode
@@ -18,12 +20,13 @@ from stream.classes.opt.allocation.genetic_algorithm.fitness_evaluator import (
 )
 from stream.utils import get_too_large_operands
 from zigzag.workload.Workload import Workload
-from .ReplayFitnessEvaluator import ReplayFitnessEvaluator
+from ReplayFitnessEvaluator import ReplayFitnessEvaluator
+from AcceleratorVirtualMachine import AcceleratorVirtualMachine
 
 logger = logging.getLogger(__name__)
 
 
-class InterCoreMappingStage(Stage):
+class ReplayInterCoreMappingStage(Stage):
     """
     Class that finds the best inter-core mapping using a genetic algorithm.
     From the IntraCoreMappingStage we receive the `node_hw_performances`, containing for each node and its valid core allocations the best CME.
@@ -45,6 +48,8 @@ class InterCoreMappingStage(Stage):
         plot_full_schedule: bool = False,
         plot_data_transfer: bool = False,
         operands_to_prefetch: list[LayerOperand],
+        schedule_json: str,
+        tile_window: dict[str, tuple[int | None, int | None]],
         **kwargs,
     ):
         """Initialize the InterCoreMappingStage.
@@ -68,6 +73,8 @@ class InterCoreMappingStage(Stage):
         self.plot_full_schedule = plot_full_schedule
         self.plot_data_transfer = plot_data_transfer
         self.operands_to_prefetch = operands_to_prefetch
+        self.tile_window = tile_window
+        self.schedule_json=schedule_json
         self.scheduling_order = kwargs.get("scheduling_order", None)
 
         # Determine the set of all (layer, group) combinations to be allocated separately
@@ -106,7 +113,9 @@ class InterCoreMappingStage(Stage):
         self.fitness_evaluator = ReplayFitnessEvaluator(
             self.workload,
             self.accelerator,
-            self.node_hw_performances
+            self.node_hw_performances,
+            self.schedule_json,
+            tile_window,
         )
 
         # Extract the length of an individual.
