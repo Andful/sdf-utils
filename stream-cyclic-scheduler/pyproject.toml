@@ -6,7 +6,7 @@ authors = [{ name="Andrea Nardi", email="buongiorno19972@gmail.com"}]
 
 dependencies = [
     "networkx >= 3",
-    "git+https://github.com/KULeuven-MICAS/stream.git",
+    "stream-dse @ git+https://github.com/KULeuven-MICAS/stream.git",
     "notebook >= 7",
     "matplotlib == 3.6",
     "plotly",

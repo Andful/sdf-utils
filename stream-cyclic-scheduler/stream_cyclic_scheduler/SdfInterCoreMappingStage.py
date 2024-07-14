@@ -123,7 +123,7 @@ class SdfInterCoreMappingStage(Stage):
 
         # Extract the length of an individual.
         # This is the number of unique original nodes that have more than one possible core allocation
-        self.individual_length = len(self.layer_groups_flexible)
+        self.individual_length = len(self.valid_allocations)
         # Extract the value range each gene in the individual can have.
         # This ranges from 0 to the max core index.
         # TODO There might be some case where a core is not possible, so it shouldnt be tried by the GA
@@ -138,6 +138,7 @@ class SdfInterCoreMappingStage(Stage):
         """
 
         logger.info("Start InterCoreMappingStage.")
+        print("Valid Allocation!!!", self.valid_allocations)
         if self.individual_length == 0:
             logger.info("Evaluating fixed layer-core allocation.")
             core_allocations = []

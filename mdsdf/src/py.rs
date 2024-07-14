@@ -1,175 +1,29 @@
 use crate::{Channel, ChannelIndex, Hsdf, HsdfChannel, Mdsdf};
 use pyo3::exceptions::PyValueError;
 use pyo3::prelude::*;
-use pyo3::types::{PyDict, PyList, PySet};
-use std::borrow::Cow;
-use std::collections::{BTreeMap, BTreeSet};
-use std::result;
-
-#[pyclass(name = "Sdf")]
-#[derive(Clone)]
-struct PySdf {
-    sdf: Mdsdf<1>,
-    names: Vec<String>,
-}
-
-#[pymethods]
-impl PySdf {
-    #[new]
-    fn new(names: Vec<String>) -> Self {
-        Self {
-            sdf: Mdsdf::new(names.len()),
-            names,
-        }
-    }
-
-    fn add_channel(
-        &mut self,
-        source: &str,
-        target: &str,
-        production_rate: usize,
-        consumption_rate: usize,
-        initial_tokens: isize,
-    ) {
-        self.sdf.add_channel(Channel {
-            source: self
-                .names
-                .iter()
-                .enumerate()
-                .filter(|e| e.1 == source)
-                .map(|e| e.0)
-                .next()
-                .unwrap(),
-            target: self
-                .names
-                .iter()
-                .enumerate()
-                .filter(|e| e.1 == target)
-                .map(|e| e.0)
-                .next()
-                .unwrap(),
-            production_rate: [production_rate].into(),
-            consumption_rate: [consumption_rate].into(),
-            initial_tokens: [initial_tokens].into(),
-        });
-    }
-
-    fn dot(&self) -> String {
-        std::iter::once(Cow::Borrowed("digraph {\n"))
-            .chain(
-                self.names
-                    .iter()
-                    .enumerate()
-                    .map(|(i, n)| format!("  L{i} [label=\"{n}\"]\n").into()),
-            )
-            .chain(self.sdf.channels.iter().map(
-                |Channel {
-                     production_rate,
-                     consumption_rate,
-                     source,
-                     target,
-                     initial_tokens,
-                 }| {
-                    format!(
-                        "  L{source} -> L{target} [taillabel={} label={} headlabel={}]\n",
-                        production_rate[0], initial_tokens[0], consumption_rate[0]
-                    )
-                    .into()
-                },
-            ))
-            .chain(std::iter::once(Cow::Borrowed("}\n")))
-            .collect()
-    }
-
-    fn hsdf(&self) -> PyHsdf {
-        PyHsdf {
-            names: self.names.clone(),
-            hsdf: self.sdf.clone().into_hsdf(),
-        }
-    }
-}
-
-#[pyclass(name = "Hsdf")]
-#[derive(Clone)]
-struct PyHsdf {
-    names: Vec<String>,
-    hsdf: Hsdf<'static, 1>,
-}
-
-#[pymethods]
-impl PyHsdf {
-    fn actors(&self) -> Vec<(String, (usize,))> {
-        self.hsdf
-            .actors()
-            .map(|(i, j)| (self.names[i].clone(), (j[0],)))
-            .collect()
-    }
-
-    fn channels(&self) -> Vec<((String, (usize,)), (String, (usize,)), (isize,))> {
-        self.hsdf
-            .channels()
-            .map(
-                |HsdfChannel {
-                     source: (s, si),
-                     target: (t, ti),
-                     initial_tokens: d,
-                 }| {
-                    (
-                        (self.names[s].clone(), (si[0],)),
-                        (self.names[t].clone(), (ti[0],)),
-                        (d[0],),
-                    )
-                },
-            )
-            .collect()
-    }
-
-    fn dot(&self) -> String {
-        std::iter::once(Cow::Borrowed("digraph {\n"))
-            .chain(self.hsdf.actors().map(|(i, j)| {
-                let name = &self.names[i];
-                format!("  L{i}_{0} [label=\"{name}({0})\"]\n", j[0]).into()
-            }))
-            .chain(self.hsdf.channels().map(
-                |HsdfChannel {
-                     source: (si, sj),
-                     target: (ti, tj),
-                     initial_tokens: d,
-                 }| {
-                    format!("  L{si}_{} -> L{ti}_{} [label={}]\n", sj[0], tj[0], d[0]).into()
-                },
-            ))
-            .chain(std::iter::once(Cow::Borrowed("}\n")))
-            .collect()
-    }
-}
-
-#[pyclass(name = "Sdf2D")]
-#[derive(Clone)]
-pub struct PySdf2D {
-    pub sdf: Mdsdf<2>,
-    pub id_map: Py<PyDict>,
-}
+use pyo3::types::{PyDict, PyList, PySet, PyTuple};
+use std::collections::BTreeSet;
 
 #[pyclass(name = "Channel")]
 #[derive(Clone)]
 struct PyChannelIndex(ChannelIndex);
 
-#[pymethods]
-impl PySdf2D {
-    #[new]
-    fn new(ids: Py<PySet>) -> PyResult<Self> {
-        let (l, id_map) = Python::with_gil(|py| {
-            let l = ids.bind(py).len();
-            let id_map = PyDict::new_bound(py);
-            for (i, id) in ids.bind(py).iter().enumerate() {
-                id_map.set_item(id, i)?;
-            }
-            PyResult::Ok((l, id_map.as_unbound().clone()))
-        })?;
+#[derive(Clone)]
+pub struct PySdf<const N: usize> {
+    pub sdf: Mdsdf<N>,
+    pub id_map: Py<PyDict>,
+}
+
+impl<const N: usize> PySdf<N> {
+    fn new<'py>(py: Python<'py>, ids: Bound<'py, PySet>) -> PyResult<Self> {
+        let l = ids.len();
+        let id_map = PyDict::new_bound(py);
+        for (i, id) in ids.iter().enumerate() {
+            id_map.set_item(id, i)?;
+        }
         Ok(Self {
             sdf: Mdsdf::new(l),
-            id_map,
+            id_map: id_map.as_unbound().clone(),
         })
     }
 
@@ -190,11 +44,11 @@ impl PySdf2D {
     fn add_channel<'py>(
         &mut self,
         py: Python<'py>,
-        source: Py<PyAny>,
-        target: Py<PyAny>,
-        production_rate: (usize, usize),
-        consumption_rate: (usize, usize),
-        initial_tokens: (isize, isize),
+        source: Bound<'py, PyAny>,
+        target: Bound<'py, PyAny>,
+        production_rate: Bound<'py, PyTuple>,
+        consumption_rate: Bound<'py, PyTuple>,
+        initial_tokens: Bound<'py, PyTuple>,
     ) -> PyResult<()> {
         self.sdf.add_channel(Channel {
             source: self
@@ -209,9 +63,9 @@ impl PySdf2D {
                 .get_item(target)?
                 .ok_or(PyValueError::new_err("No such actor"))?
                 .extract()?,
-            production_rate: production_rate.into(),
-            consumption_rate: consumption_rate.into(),
-            initial_tokens: initial_tokens.into(),
+            production_rate: production_rate.extract::<[usize; N]>()?.into(),
+            consumption_rate: consumption_rate.extract::<[usize; N]>()?.into(),
+            initial_tokens: initial_tokens.extract::<[isize; N]>()?.into(),
         });
         Ok(())
     }
@@ -318,10 +172,15 @@ impl PySdf2D {
         if let Some(_) = id_map.get_item(&new_actor)? {
             return Err(PyErr::new::<PyValueError, _>("Actor already present"));
         }
-
         let new_actor_id = id_map.len();
         id_map.set_item(new_actor, new_actor_id)?;
         self.sdf.n_actors = id_map.len();
+
+        let mut id_map = id_map.iter().map(|(a, b)| PyResult::Ok((b.extract::<usize>()?, a))).try_collect::<Vec<(usize, Bound<'py, PyAny>)>>()?;
+        id_map.sort_by_key(|(i, _)| *i);
+        debug_assert!(id_map.iter().enumerate().all(|(i, (j, _))| i == *j));
+        let id_map = id_map.into_iter().map(|(_, a)| a).collect::<Vec<_>>();
+
         let index = self
             .sdf
             .channels
@@ -329,13 +188,9 @@ impl PySdf2D {
             .enumerate()
             .try_fold(None, |init, result| {
                 let Channel { source, target, .. } = &result.1;
-                if id_map
-                    .get_item(source)?
-                    .expect("unreachable")
+                if id_map[*source]
                     .eq(&channel.0)?
-                    && id_map
-                        .get_item(target)?
-                        .expect("unreachable")
+                    && id_map[*target]
                         .eq(&channel.1)?
                 {
                     let None = init else {
@@ -359,7 +214,7 @@ impl PySdf2D {
             consumption_rate: production_rate,
             source,
             target: new_actor_id,
-            initial_tokens: [0, 0].into(),
+            initial_tokens: Default::default(),
         });
         self.sdf.add_channel(Channel {
             production_rate,
@@ -371,8 +226,8 @@ impl PySdf2D {
         Ok(())
     }
 
-    fn induce<'py>(&self, py: Python<'py>, sub_ids: Py<PySet>) -> PyResult<PySdf2D> {
-        let mut result = PySdf2D::new(sub_ids)?;
+    fn induce<'py>(&self, py: Python<'py>, sub_ids: Bound<'py, PySet>) -> PyResult<Self> {
+        let mut result = Self::new(py, sub_ids)?;
         let id_to_hashable = self
             .id_map
             .bind(py)
@@ -417,7 +272,7 @@ impl PySdf2D {
         Ok(result)
     }
 
-    fn dot<'py>(&self, py: Python<'py>) -> PyResult<String> {
+    pub fn dot<'py>(&self, py: Python<'py>) -> PyResult<String> {
         std::iter::once(Ok("digraph {\n".to_string()))
             .chain(
                 self.id_map.bind(py)
@@ -447,7 +302,7 @@ impl PySdf2D {
             .try_collect()
     }
 
-    fn hsdf<'py>(&self, py: Python<'py>) -> PyResult<PyHsdf2D> {
+    fn hsdf<'py>(&self, py: Python<'py>) -> PyResult<PyHsdf<N>> {
         let mut unsorted_id_map = self
             .id_map
             .bind(py)
@@ -460,26 +315,24 @@ impl PySdf2D {
             .enumerate()
             .all(|(i, (j, _))| i == *j));
 
-        Ok(PyHsdf2D {
+        Ok(PyHsdf {
             id_map: unsorted_id_map.into_iter().map(|(_, e)| e).collect(),
             hsdf: self.sdf.clone().into_hsdf(),
         })
     }
 }
 
-#[pyclass(name = "Hsdf2D")]
 #[derive(Clone)]
-struct PyHsdf2D {
+struct PyHsdf<const N: usize> {
     id_map: Vec<Py<PyAny>>,
-    hsdf: Hsdf<'static, 2>,
+    hsdf: Hsdf<'static, N>,
 }
 
-#[pymethods]
-impl PyHsdf2D {
-    fn actors<'py>(&self, py: Python<'py>) -> PyResult<Vec<(Bound<'py, PyAny>, (usize, usize))>> {
+impl<const N: usize> PyHsdf<N> {
+    fn actors<'py>(&self, py: Python<'py>) -> PyResult<Vec<(Bound<'py, PyAny>, Py<PyTuple>)>> {
         self.hsdf
             .actors()
-            .map(|(i, j)| Ok((self.id_map[i].bind(py).clone(), (j[0], j[1]))))
+            .map(|(i, j)| Ok((self.id_map[i].bind(py).clone(), j.into_py(py))))
             .try_collect()
     }
 
@@ -488,9 +341,9 @@ impl PyHsdf2D {
         py: Python<'py>,
     ) -> PyResult<
         Vec<(
-            (Bound<'py, PyAny>, (usize, usize)),
-            (Bound<'py, PyAny>, (usize, usize)),
-            (isize, isize),
+            (Bound<'py, PyAny>, Py<PyTuple>),
+            (Bound<'py, PyAny>, Py<PyTuple>),
+            Py<PyTuple>,
         )>,
     > {
         self.hsdf
@@ -502,9 +355,9 @@ impl PyHsdf2D {
                      initial_tokens,
                  }| {
                     Ok((
-                        (self.id_map[s].bind(py).clone(), (si[0], si[1])),
-                        (self.id_map[t].bind(py).clone(), (ti[0], ti[1])),
-                        (initial_tokens[0], initial_tokens[1]),
+                        (self.id_map[s].bind(py).clone(), si.into_py(py)),
+                        (self.id_map[t].bind(py).clone(), ti.into_py(py)),
+                        initial_tokens.into_py(py),
                     ))
                 },
             )
@@ -556,9 +409,128 @@ impl PyHsdf2D {
     }
 }
 
+macro_rules! impl_sdf {
+    ($sdf_name:ident, $hsdf_name:ident, $n:literal) => {
+        #[derive(Clone)]
+        #[pyclass]
+        pub struct $hsdf_name(pub PyHsdf<$n>);
+
+        #[derive(Clone)]
+        #[pyclass]
+        pub struct $sdf_name(pub PySdf<$n>);
+
+        #[pymethods]
+        impl $sdf_name {
+            #[new]
+            pub fn new<'py>(py: Python<'py>, ids: Bound<'py, PySet>) -> PyResult<Self> {
+                Ok(Self(PySdf::new(py, ids)?))
+            }
+
+            pub fn __str__<'py>(&self, py: Python<'py>) -> PyResult<String> {
+                self.0.__str__(py)
+            }
+
+            pub fn add_channel<'py>(
+                &mut self,
+                py: Python<'py>,
+                source: Bound<'py, PyAny>,
+                target: Bound<'py, PyAny>,
+                production_rate: Bound<'py, PyTuple>,
+                consumption_rate: Bound<'py, PyTuple>,
+                initial_tokens: Bound<'py, PyTuple>,
+            ) -> PyResult<()> {
+                self.0.add_channel(
+                    py,
+                    source,
+                    target,
+                    production_rate,
+                    consumption_rate,
+                    initial_tokens,
+                )
+            }
+
+            pub fn add_actor<'py>(&mut self, py: Python<'py>, e: Bound<'py, PyAny>) -> PyResult<()> {
+                self.0.add_actor(py, e)
+            }
+
+            pub fn sources<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+                self.0.sources(py)
+            }
+
+            pub fn sinks<'py>(&self, py: Python<'py>) -> PyResult<Vec<Bound<'py, PyAny>>> {
+                self.0.sinks(py)
+            }
+
+            pub fn actors<'py>(&self, py: Python<'py>) -> Bound<'py, PyList> {
+                self.0.actors(py)
+            }
+
+            pub fn channels<'py>(
+                &self,
+                py: Python<'py>,
+            ) -> PyResult<Vec<(Bound<'py, PyAny>, Bound<'py, PyAny>)>> {
+                self.0.channels(py)
+            }
+
+            pub fn cut_channel<'py>(
+                &mut self,
+                py: Python<'py>,
+                channel: (Bound<'py, PyAny>, Bound<'py, PyAny>),
+                new_actor: Bound<'py, PyAny>,
+            ) -> PyResult<()> {
+                self.0.cut_channel(py, channel, new_actor)
+            }
+
+            pub fn induce<'py>(&self, py: Python<'py>, sub_ids: Bound<'py, PySet>) -> PyResult<Self> {
+                Ok(Self(self.0.induce(py, sub_ids)?))
+            }
+
+            pub fn dot<'py>(&self, py: Python<'py>) -> PyResult<String> {
+                self.0.dot(py)
+            }
+
+            pub fn hsdf<'py>(&self, py: Python<'py>) -> PyResult<$hsdf_name> {
+                Ok($hsdf_name(self.0.hsdf(py)?))
+            }
+        }
+
+        #[pymethods]
+        impl $hsdf_name {
+            pub fn actors<'py>(
+                &self,
+                py: Python<'py>,
+            ) -> PyResult<Vec<(Bound<'py, PyAny>, Py<PyTuple>)>> {
+                self.0.actors(py)
+            }
+
+            pub fn channels<'py>(
+                &self,
+                py: Python<'py>,
+            ) -> PyResult<
+                Vec<(
+                    (Bound<'py, PyAny>, Py<PyTuple>),
+                    (Bound<'py, PyAny>, Py<PyTuple>),
+                    Py<PyTuple>,
+                )>,
+            > {
+                self.0.channels(py)
+            }
+
+            pub fn dot<'py>(&self, py: Python<'py>) -> PyResult<String> {
+                self.0.dot(py)
+            }
+        }
+    };
+}
+
+impl_sdf!(Sdf1D, Hsdf1D, 1);
+impl_sdf!(Sdf2D, Hsdf2D, 2);
+impl_sdf!(Sdf3D, Hsdf3D, 3);
+
 #[pymodule]
 fn mdsdf(m: &Bound<'_, PyModule>) -> PyResult<()> {
-    m.add_class::<PySdf>()?;
-    m.add_class::<PySdf2D>()?;
+    m.add_class::<Sdf1D>()?;
+    m.add_class::<Sdf2D>()?;
+    m.add_class::<Sdf3D>()?;
     Ok(())
 }

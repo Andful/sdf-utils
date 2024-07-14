@@ -1,0 +1,16 @@
+name: tpu_like_single_core
+cores:
+  # index corresponds to core ID
+  - ./big_tpu.yaml
+  - ./simd.yaml
+  - ./offchip.yaml
+
+graph:
+  type: 2d_mesh
+  nb_rows: 1
+  nb_cols: 1
+  bandwidth: 32
+  unit_energy_cost: 0
+  simd_core_id: 1
+  offchip_core_id: 2
+

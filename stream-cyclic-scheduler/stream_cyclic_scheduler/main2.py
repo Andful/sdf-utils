@@ -34,9 +34,9 @@ mainstage = MainStage(
         IntraCoreMappingStage,
         InterCoreMappingStage,
     ],
-    accelerator="architecture/tpu_like_quad_core.yaml",  # required by AcceleratorParserStage
+    accelerator="architecture/single_core.yaml",  # required by AcceleratorParserStage
     workload_path="./workload/fsrcnn.onnx",  # required by ModelParserStage
-    mapping_path="./mapping/tpu_like_quad_core.yaml",
+    mapping_path="./mapping/single_core.yaml",
     cn_define_mode=1,
     tile_window=dict([
         ("custom_added_Conv1", (1, None)),
@@ -60,19 +60,21 @@ mainstage = MainStage(
 [(scme, _), *_] = mainstage.run()
 
 
-visualize_timeline_plotly(
+print(scme.latency, scme.energy)
+
+"""visualize_timeline_plotly(
     scme,
     draw_communication=True,
     fig_path="/home/andful/Documents/plot.html"
-)
+)"""
 #%%
-"""plot_timeline_brokenaxes(
+plot_timeline_brokenaxes(
     scme,
     False,
     section_start_percent=(0,97),
     percent_shown=(3,3),
     plot_data_transfer=True,
-    fig_path="/tmp/timeline",
-)"""
+    fig_path="/home/andful/Documents/plot.png",
+)
 
 # %%

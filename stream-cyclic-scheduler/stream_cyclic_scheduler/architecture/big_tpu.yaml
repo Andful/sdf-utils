@@ -1,12 +1,12 @@
 name: tpu_like
 
 memories:
-  rf_128B:
-    size: 1024
+  rf_W_64B:
+    size: 512
     r_bw: 8
     w_bw: 8
-    r_cost: 0.095
-    w_cost: 0.095
+    r_cost: 0.053
+    w_cost: 0.053
     area: 0
     r_port: 1
     w_port: 1
@@ -17,14 +17,14 @@ memories:
     ports:
       - fh: w_port_1
         tl: r_port_1
-    served_dimensions: [] # Fully unrolled over all multipliers
+    served_dimensions: []
 
-  rf_2B:
+  rf_O_1K:
     size: 16
     r_bw: 16
     w_bw: 16
-    r_cost: 0.021
-    w_cost: 0.021
+    r_cost: 0.54
+    w_cost: 0.54
     area: 0
     r_port: 2
     w_port: 2
@@ -38,23 +38,23 @@ memories:
         th: r_port_2
     served_dimensions: [D2]
 
-  sram_2MB:
-    size: 16777216
-    r_bw: 2048
-    w_bw: 2048
-    r_cost: 416.16
-    w_cost: 378.4
+
+  sram_1MB_A:
+    size: 8388608
+    r_bw: 512
+    w_bw: 512
+    r_cost: 0 # Auto Extract
+    w_cost: 0 # Auto Extract
     area: 0
     r_port: 1
     w_port: 1
     rw_port: 0
     latency: 1
-    min_r_granularity: 64
-    min_w_granularity: 64
-    operands: [I1, I2, O]
+    min_r_granularity: 512
+    min_w_granularity: 512
+    auto_cost_extraction: True
+    operands: [I1, O]
     ports:
-      - fh: w_port_1
-        tl: r_port_1
       - fh: w_port_1
         tl: r_port_1
       - fh: w_port_1
@@ -63,9 +63,29 @@ memories:
         th: r_port_1
     served_dimensions: [D1, D2]
 
-multipliers:
+  sram_1MB_W:
+    size: 8388608
+    r_bw: 128
+    w_bw: 128
+    r_cost: 0 # Auto Extract
+    w_cost: 0 # Auto Extract
+    area: 0
+    r_port: 1
+    w_port: 1
+    rw_port: 0
+    latency: 1
+    min_r_granularity: 128
+    min_w_granularity: 128
+    auto_cost_extraction: True
+    operands: [I2]
+    ports:
+      - fh: w_port_1
+        tl: r_port_1
+    served_dimensions: [D1, D2]
+
+operational_array:
   input_precision: [8, 8]
   multiplier_energy: 0.04 # pJ
   multiplier_area: 1 # unit
   dimensions: [D1, D2]
-  sizes: [32, 32]
+  sizes: [64, 64]

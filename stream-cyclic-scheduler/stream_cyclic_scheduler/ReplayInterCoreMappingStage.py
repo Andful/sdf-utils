@@ -135,38 +135,8 @@ class ReplayInterCoreMappingStage(Stage):
         """
 
         logger.info("Start InterCoreMappingStage.")
-        if self.individual_length == 0:
-            logger.info("Evaluating fixed layer-core allocation.")
-            core_allocations = []
-            (energy, latency, scme) = self.fitness_evaluator.get_fitness(core_allocations, return_scme=True)
-            # scme.plot_schedule(plot_full_schedule=self.plot_full_schedule,
-            #                    plot_data_transfer=self.plot_data_transfer,
-            #                    fig_path=f"outputs/schedule_plot{self.fig_path}fixed.png")
-            # scme.plot_memory_usage(fig_path=f"outputs/memory_usage_plot{self.fig_path}fixed.png")
-            yield scme, None
-        else:
-            logger.info("Running Inter-Core Allocation Optimization with Genetic Algorithm.")
-            # Initialize the genetic algorithm
-            self.genetic_algorithm = GeneticAlgorithm(
-                self.fitness_evaluator,
-                self.individual_length,
-                self.valid_allocations,
-                self.nb_generations,
-                self.nb_individuals,
-            )
-            # Run the genetic algorithm and get the results
-            pop, hof = self.genetic_algorithm.run()
-            logger.info("Finished Genetic Algorithm.")
-            if self.plot_hof:
-                for i, core_allocations in enumerate(hof):
-                    results = self.fitness_evaluator.get_fitness(core_allocations, return_scme=True)
-                    scme = results[-1]
-                    # scme.plot_schedule(plot_full_schedule=self.plot_full_schedule,
-                    #                    plot_data_transfer=self.plot_data_transfer,
-                    #                    fig_path=f"outputs/schedule_plot{self.fig_path}{i}.png")
-                    # scme.plot_memory_usage(fig_path=f"outputs/memory_usage_plot{self.fig_path}{i}.png")
-            yield scme, None
-        logger.info("Finished InterCoreMappingStage.")
+        (energy, latency, scme) = self.fitness_evaluator.get_fitness([], return_scme=True)
+        yield scme, None
 
     def set_hw_performance_non_flexible_nodes(self):
         """Set the energy, runtime and core_allocation of the nodes in self.workload that only have a single possible core allocation."""

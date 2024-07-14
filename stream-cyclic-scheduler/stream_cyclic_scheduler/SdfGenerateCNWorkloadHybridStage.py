@@ -7,7 +7,7 @@ import networkx as nx
 from networkx import DiGraph
 import numpy as np
 from rtree import index
-from stream_schedule_solver import Sdf2D
+from stream_schedule_solver import Sdf1D
 from stream.classes.hardware.architecture.accelerator import Accelerator
 from stream.classes.opt.splitting.TemporalLoop import TemporalLoop
 from stream.classes.workload.node import Node
@@ -65,7 +65,7 @@ class SdfGenerateCNWorkloadHybridStage(Stage):
         self.numpy_tensors = {}
         self.tile_window = tile_window
 
-    def generatr_finer_nodes(self) -> Generator[ComputationNode, None, None]:
+    def generate_finer_nodes(self) -> Generator[ComputationNode, None, None]:
         for node in self.workload.nodes():
             # TODO allow elemntwise as well
             assert isinstance(
@@ -75,8 +75,17 @@ class SdfGenerateCNWorkloadHybridStage(Stage):
 
     def run(self):
         nodes: dict[int, ComputationNode] = dict(
-            map(lambda x: (x.id, x), self.generatr_finer_nodes()))
-        sdf: Sdf2D[ComputationNode] = Sdf2D(set(nodes.values()))
+            map(lambda x: (x.id, x), self.generate_finer_nodes()))
+        sdf: Sdf1D[ComputationNode] = Sdf1D(set(nodes.values()))
+
+        window = self.tile_window[next(iter(self.workload.nodes())).name]
+        optimization_direction = "X" if window[0] is None else "Y"
+
+
+        for a in self.workload.nodes():
+            a = cast(ComputationNode, a)
+            window = self.tile_window[a.name]
+            assert window[0] is None or window[1] is None, "Either dimension must be None"
         for (a, b) in self.workload.edges():
             a = cast(ComputationNode, a)
             b = cast(ComputationNode, b)
@@ -86,42 +95,60 @@ class SdfGenerateCNWorkloadHybridStage(Stage):
             source_window = self.tile_window[a.name]
             target_window = self.tile_window[b.name]
             assert ((source_window[0] is not None and target_window[0] is not None) or (
-                source_window[0] is None and target_window[0] is None))
+                source_window[0] is None and target_window[0] is None)), "Tiled dimension must be same"
             assert ((source_window[1] is not None and target_window[1] is not None) or (
-                source_window[1] is None and target_window[1] is None))
+                source_window[1] is None and target_window[1] is None)), "Tiled dimension must be same"
 
             node_attr = b.extract_node_attr()
 
-            assert (node_attr.dimension_relations[0].dim_1 == LayerDim("IX"))
-            assert (node_attr.dimension_relations[0].dim_2 == LayerDim("OX"))
-            assert (node_attr.dimension_relations[1].dim_1 == LayerDim("IY"))
-            assert (node_attr.dimension_relations[1].dim_2 == LayerDim("OY"))
+            if len(node_attr.dimension_relations) == 0:
+                stride = (source_window[0] or 1, source_window[1] or 1)
+                production_rate = (
+                    source_window[0] or 1, source_window[1] or 1)
+                consumption_rate = (
+                    source_window[0] or 1, source_window[1] or 1)
+                initial_tokens = (0, 0)
+            else:
+                assert (node_attr.dimension_relations[0].dim_1 == LayerDim("IX"))
+                assert (node_attr.dimension_relations[0].dim_2 == LayerDim("OX"))
+                assert (node_attr.dimension_relations[1].dim_1 == LayerDim("IY"))
+                assert (node_attr.dimension_relations[1].dim_2 == LayerDim("OY"))
 
-            stride = (
-                node_attr.dimension_relations[0].coef_2, node_attr.dimension_relations[1].coef_2)
+                stride = (
+                    node_attr.dimension_relations[0].coef_2, node_attr.dimension_relations[1].coef_2)
 
-            production_rate = (
-                source_window[0] or 1, source_window[1] or 1)
+                production_rate = (
+                    source_window[0] or 1, source_window[1] or 1)
 
-            consumption_rate = (1 if target_window[0] is None else stride[0]*target_window[0],
-                                1 if target_window[1] is None else stride[1]*target_window[1])
+                consumption_rate = (1 if target_window[0] is None else stride[0]*target_window[0],
+                                    1 if target_window[1] is None else stride[1]*target_window[1])
 
-            initial_tokens = (0 if target_window[0] is None else 1 - consumption_rate[0] - node_attr.layer_dim_sizes[LayerDim('FX')] + production_rate[0] + node_attr.padding[LayerDim('IX')][0],
-                              0 if target_window[1] is None else 1 - consumption_rate[1] - node_attr.layer_dim_sizes[LayerDim('FY')] + production_rate[1] + node_attr.padding[LayerDim('IY')][0])
+                initial_tokens = (0 if target_window[0] is None else 1 - consumption_rate[0] - node_attr.layer_dim_sizes[LayerDim('FX')] + production_rate[0] + node_attr.padding[LayerDim('IX')][0],
+                                0 if target_window[1] is None else 1 - consumption_rate[1] - node_attr.layer_dim_sizes[LayerDim('FY')] + production_rate[1] + node_attr.padding[LayerDim('IY')][0])
 
-            sdf.add_channel(
-                source=source,
-                target=target,
-                production_rate=production_rate,
-                consumption_rate=consumption_rate,
-                initial_tokens=initial_tokens
-            )
+            if source_window[0] is not None:
+                sdf.add_channel(
+                    source=source,
+                    target=target,
+                    production_rate=(production_rate[0],),
+                    consumption_rate=(consumption_rate[0],),
+                    initial_tokens=(initial_tokens[0],)
+                )
+            elif source_window[1] is not None:
+                sdf.add_channel(
+                    source=source,
+                    target=target,
+                    production_rate=(production_rate[1],),
+                    consumption_rate=(consumption_rate[1],),
+                    initial_tokens=(initial_tokens[1],)
+                )
 
         kwargs = self.kwargs.copy()
         kwargs["sdf"] = sdf
         kwargs["original_workload"] = pickle_deepcopy(self.workload)
         kwargs["accelerator"] = self.accelerator
         kwargs["tile_window"] = self.tile_window
+        kwargs["optimization_direction"] = optimization_direction
         sub_stage = self.list_of_callables[0](
             self.list_of_callables[1:], **kwargs)
         for cme, extra_info in sub_stage.run():
@@ -253,14 +280,14 @@ class SdfGenerateCNWorkloadHybridStage(Stage):
 
         # Take away the outer_temporal_loops to create finer CNs for this node
         finer_node_attrs = original_node.extract_node_attr()
-        number_execution = (None, None)
+        number_execution = 1
         for outer_tl in outer_temporal_loops:
             outer_dim = outer_tl.dimension
             outer_size = outer_tl.size
             if outer_dim == LayerDim("OX"):
-                number_execution = (outer_size, number_execution[1])
+                number_execution *= outer_size
             elif outer_dim == LayerDim("OY"):
-                number_execution = (number_execution[0], outer_size)
+                number_execution *= outer_size
             # Check if this node's "dim" size is divisible by the outer-cn loop size
             node_dim_size = original_node.extract_node_attr(
             ).layer_dim_sizes[outer_dim]

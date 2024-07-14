@@ -1,0 +1,5 @@
+digraph {
+  L0 [label="Communication(source=ComputationNode3_0, target='DRAM', latency=3008, energy=3164476.16, links=(CommunicationLink(Core(3), Any, bw=64),), token_size=0, target_core=3, number_execution=1242)"]
+  L1 [label="ComputationNode3_0"]
+  L1 -> L0 [taillabel="(1)" label="(0)" headlabel="(1)"]
+}

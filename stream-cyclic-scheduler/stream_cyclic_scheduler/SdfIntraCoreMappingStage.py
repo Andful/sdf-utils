@@ -32,15 +32,13 @@ from zigzag.workload.layer_attributes import LayerDimSizes
 
 logger = logging.getLogger(__name__)
 
-from mdsdf import Sdf2D
-
 class SdfIntraCoreMappingStage(Stage):
     """
     Class that saves the optimal CME for each valid node-core allocation to the node.
     """
 
     def __init__(
-        self, list_of_callables, *, sdf: "Sdf2D[ComputationNode]", accelerator: Accelerator, original_workload: Workload, loma_lpf_limit: int, **kwargs
+        self, list_of_callables, *, sdf: "Sdf2D[ComputationNode]", accelerator: Accelerator, original_workload: Workload, tile_window: dict[str, tuple[int | None, int | None]], loma_lpf_limit: int, **kwargs
     ):
         """
         Initialize the stage by:
@@ -55,6 +53,7 @@ class SdfIntraCoreMappingStage(Stage):
         self.node_hw_performances_path: str | None = kwargs.get("node_hw_performances_path", None)
         self.sdf = sdf
         self.unique_nodes: list[ComputationNode] = sdf.actors()
+        self.tile_window = tile_window
 
         # Initialize the valid node-core allocations.
         self.valid_allocations: dict[ComputationNode, list[int]] = {}
@@ -79,15 +78,23 @@ class SdfIntraCoreMappingStage(Stage):
             self.given_node_hw_performances = None
 
         for node in self.unique_nodes:
+            # TODO This should never evaluate to true: enforce core_allocation as list everywhere
             if isinstance(self.valid_allocations[node], tuple):
                 raise ValueError
+                # try:
+                #     core_ids = (self.valid_allocations[node][node.group],)
+                # except IndexError:
+                #     nb_groups = len(set((n.group for n in self.workload.nodes() if n.id == node)))
+                #     assert (
+                #         len(self.valid_allocations[node]) == 1
+                #     ), f"Fixed mapping for {node.name} should contain {nb_groups} entries."
+                #     core_ids = (self.valid_allocations[node][0],)
             else:
                 core_ids = self.valid_allocations[node]
-
             for core_id in core_ids:
                 core = self.accelerator.get_core(core_id)
                 # Offchip memory core doesn't have operational units
-                if core.id == self.accelerator.offchip_core_id:
+                if core.operational_array.total_area == 0:
                     continue
                 # It's possible this node might not fully fit within the core's top level memories. If so, we update the core
                 too_large_operands_for_cme = self.check_core_capacity_for_node(core, node)
@@ -143,9 +150,13 @@ class SdfIntraCoreMappingStage(Stage):
         kwargs = self.kwargs.copy()
         kwargs["accelerator"] = self.accelerator
         kwargs["node_hw_performances"] = self.node_hw_performances
+        kwargs["sdf"] = self.sdf
+        kwargs["original_workload"] = self.original_workload
+        kwargs["tile_window"] = self.tile_window
+
 
         logger.info(f"Finished IntraCoreMappingStage.")
-        sub_stage = self.list_of_callables[0](self.list_of_callables[1:], sdf=self.sdf, original_workload=self.original_workload, **kwargs)
+        sub_stage = self.list_of_callables[0](self.list_of_callables[1:], **kwargs)
         for cme, extra_info in sub_stage.run():
             yield cme, extra_info
 
@@ -232,12 +243,12 @@ class SdfIntraCoreMappingStage(Stage):
         output_operand = node.output_operand
 
         original_nodes: dict[int, ComputationNode] = {}
-        for node in self.original_workload.nodes():
-            original_nodes[node.id] = node
+        for n in self.original_workload.nodes():
+            original_nodes[n.id] = n
 
         finer_nodes: dict[int, ComputationNode] = {}
-        for node in self.sdf.actors():
-            finer_nodes[node.id] = node
+        for n in self.sdf.actors():
+            finer_nodes[n.id] = n
 
         for top_memory in unique_top_memories:
             top_level_capacity = top_memory.memory_instance.size
@@ -252,9 +263,28 @@ class SdfIntraCoreMappingStage(Stage):
                 # which can be larger than the ideal required data size
                 else:
                     bits_to_be_stored_in_top_level[memory_operand] = 0
-                    in_edges_data = [(source, data) for (source, _, data) in self.original_workload.in_edges(original_nodes[node.id], data=True)]
-                    for source in (source for (source, d) in in_edges_data if "operand" in d and d["operand"] == layer_operand):
-                        bits_to_be_stored_in_top_level[memory_operand] += finer_nodes[source.id].operand_tensors[LayerOperand('O')].size
+                    original_node = original_nodes[node.id]
+                    layer_info = original_node.extract_node_attr()
+                    operand_source = layer_info.input_operand_source[layer_operand]
+
+                    source_tensor = finer_nodes[operand_source].operand_tensors[LayerOperand("O")]
+                    target_tensor = node.operand_tensors[layer_operand]
+
+                    window = self.tile_window[node.name]
+                    if window[0] is not None:
+                        source_rate = dict(zip(source_tensor.loop_dimensions, map(lambda e: e[1] - e[0], source_tensor.loop_ranges)))[LayerDim('OX')]
+                        target_rate = dict(zip(target_tensor.loop_dimensions, map(lambda e: e[1] - e[0], target_tensor.loop_ranges)))[LayerDim('IX')]
+                    elif window[1] is not None:
+                        source_rate = dict(zip(source_tensor.loop_dimensions, map(lambda e: e[1] - e[0], source_tensor.loop_ranges)))[LayerDim('OY')]
+                        target_rate = dict(zip(target_tensor.loop_dimensions, map(lambda e: e[1] - e[0], target_tensor.loop_ranges)))[LayerDim('IY')]
+                    else:
+                        assert False
+                    import math
+                    #TODO!!! check for correctness
+                    denom = math.gcd(source_rate, target_rate)
+                    max_dependant = math.ceil((target_rate + source_rate - denom)/(source_rate))
+
+                    bits_to_be_stored_in_top_level[memory_operand] += max(target_tensor.size, max_dependant*source_tensor.size)
             total_required_capacity = sum(bits_to_be_stored_in_top_level.values())
 
             # Step 3: compare the total required capacity with the top level memory capacity

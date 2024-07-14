@@ -1,11 +1,13 @@
 use std::{
-    convert::TryFrom,
     convert::TryInto,
     ops::{Add, Div, Index, IndexMut, Mul, Rem, Sub},
 };
 
 use num::Zero;
-use pyo3::{types::PyAnyMethods, FromPyObject};
+use pyo3::{
+    types::{PyAnyMethods, PyTuple},
+    FromPyObject, IntoPy, Py, Python, ToPyObject,
+};
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub struct Vector<const N: usize, E>([E; N]);
@@ -14,6 +16,15 @@ impl<'a, const N: usize, E: FromPyObject<'a>> FromPyObject<'a> for Vector<N, E> 
     fn extract_bound(ob: &pyo3::Bound<'a, pyo3::PyAny>) -> pyo3::PyResult<Self> {
         let e: [E; N] = ob.extract()?;
         Ok(e.into())
+    }
+}
+
+impl<const N: usize, E> IntoPy<Py<PyTuple>> for Vector<N, E>
+where
+    E: Clone + ToPyObject,
+{
+    fn into_py(self, py: Python<'_>) -> Py<PyTuple> {
+        PyTuple::new_bound(py, self.0.clone().to_vec()).unbind()
     }
 }
 

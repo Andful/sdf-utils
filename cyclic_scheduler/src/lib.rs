@@ -1,30 +1,29 @@
 #![feature(iterator_try_collect)]
 
-mod py;
-
 use itertools::Itertools;
 use mdsdf::vector::Vector;
 use milp_formulation::{ExecutionTimeT, MilpFormulation, NameT};
-use std::collections::BTreeMap;
 
 pub fn cyclic_scheduler<const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: NameT<N>>(
     milp: &mut MilpFormulation<'_, N, ExecutionTime, Name>,
-    mut processor: impl FnMut((usize, Vector<N, usize>)) -> usize,
+    n_processors: usize,
+    mut uses_processor: impl FnMut((usize, Vector<N, usize>), usize) -> bool,
     dimension: usize,
 ) -> grb::Result<()> {
     use grb::prelude::*;
-    let mut processor_assignment: BTreeMap<usize, Vec<(usize, Vector<N, usize>)>> =
-        Default::default();
-    for k in milp.u.keys() {
-        processor_assignment
-            .entry(processor(*k))
-            .or_default()
-            .push(*k);
-    }
+    let processor_assignment = (0..n_processors)
+        .map(|p| {
+            milp.u
+                .keys()
+                .map(Clone::clone)
+                .filter(|task| uses_processor(*task, p))
+                .collect::<Vec<_>>()
+        })
+        .collect::<Vec<_>>();
 
     let model = &mut milp.model;
     let throughput = milp.throughputs[dimension];
-    for tasks in processor_assignment.values() {
+    for tasks in processor_assignment.iter() {
         for (t1, t2) in tasks.iter().tuple_combinations() {
             let task1 = milp.u.get(t1).unwrap();
             let task2 = milp.u.get(t2).unwrap();
@@ -64,7 +63,7 @@ pub fn cyclic_scheduler<const N: usize, ExecutionTime: ExecutionTimeT<N>, Name: 
 #[cfg(test)]
 mod test {
     use super::*;
-    use std::{borrow::Cow, collections::BTreeMap};
+    use std::borrow::Cow;
 
     use mdsdf::{vector::Vector, Channel, Mdsdf};
     use milp_formulation::MilpFormulation;
@@ -130,7 +129,7 @@ mod test {
             }
         }
         let mut milp = MilpFormulation::new(Cow::Borrowed(&hsdf), ExecutionTime, Name).unwrap();
-        cyclic_scheduler(&mut milp, |(i, _)| [0, 1, 0][i], 0).unwrap();
+        cyclic_scheduler(&mut milp, 2,|(i, _), p| [0, 1, 0][i] == p, 0).unwrap();
 
         let model = &mut milp.model;
         let throughput = &milp.throughputs[0];

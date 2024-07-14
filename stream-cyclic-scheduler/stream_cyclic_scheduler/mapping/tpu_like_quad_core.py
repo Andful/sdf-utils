@@ -1,12 +1,12 @@
 mapping = {
     "default": {
-        "core_allocation": [0, 1, 2, 3],
+        "core_allocation": [0],
     },
     "Conv": {
-        "core_allocation": [0, 1, 2, 3],
+        "core_allocation": [1],
     },
     "Gemm": {
-        "core_allocation": [0, 1, 2, 3],
+        "core_allocation": [2],
     },
     "Pool": {
         "core_allocation": 4,

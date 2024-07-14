@@ -32,26 +32,20 @@ class ReplayFitnessEvaluator(FitnessEvaluator):
         self.workload = workload
         self.tile_window = tile_window
 
-        computation_nodes: dict[tuple[str, int, int], ComputationNode] = dict()
-
-        for n in self.workload.nodes():
-            n = cast(ComputationNode, n)
-            index = np.array([n.loop_ranges.get(LayerDim('OX'))[0], n.loop_ranges.get(LayerDim('OY'))[0]])
-            window = self.tile_window[n.name]
-            window = np.array([window[0] or index[0], window[1] or index[1]])
-
-            computation_nodes[(n.name, tuple(index//window))] = n
-        
-        self.computation_nodes = computation_nodes
-
         import json
 
         with open(schedule_json, "r") as f:
-            self.schedule = json.load(f)
+            obj = json.load(f)
+            self.schedule = obj["stack_schedules"]
+            self.core_allocation = obj["core_allocation"]
+            for n in self.workload:
+                n = cast(ComputationNode, n)
+                n.core_allocation = self.core_allocation[n.name]
+                n.chosen_core_allocation = n.core_allocation
 
         self.vm = AcceleratorVirtualMachine(self.accelerator, self.workload)
 
-        print(self.computation_nodes)
+        #print(self.computation_nodes)
 
     def get_fitness(self, core_allocations: list[int], return_scme: bool = False):
         """Get the fitness of the given core_allocations
@@ -60,71 +54,79 @@ class ReplayFitnessEvaluator(FitnessEvaluator):
             core_allocations (list): core_allocations
         """
         self.set_node_core_allocations(core_allocations)
-        print(self.schedule)
         scme = StreamCostModelEvaluation(
-            pickle_deepcopy(self.workload),
-            pickle_deepcopy(self.accelerator),
+            self.workload,
+            self.accelerator,
             [],
             None,
         )
+        computation_nodes: dict[tuple[str, int], ComputationNode] = dict()
+
+        for n in scme.workload.nodes():
+            n = cast(ComputationNode, n)
+            index = np.array([n.loop_ranges.get(LayerDim('OX'))[0], n.loop_ranges.get(LayerDim('OY'))[0]])
+            window = self.tile_window[n.name]
+            if window[0] is not None:
+                i = index[0]//window[0]
+            elif window[1] is not None:
+                i = index[1]//window[1]
+
+            computation_nodes[(n.name, i)] = n
+        
+        self.computation_nodes = computation_nodes
         offchip = self.accelerator.get_core(self.accelerator.offchip_core_id)
         offset = 0
-        for stack in self.schedule["stack_schedules"]:
+        for stack in self.schedule:
             cycle_time: int = stack["cycle_time"]
             layers: set[str] = set(stack["layers"])
             offset = self.vm.load_weights(layers, offset)
-            raster_direction = 0 if stack["raster_direction"] == "X" else 1
-            other_direction = 1 - raster_direction
             tasks = []
             for exececution in stack["execution"]:
                 tasks += exececution["tasks"]
 
-            tasks = sorted(tasks, key=lambda x: x["start_time"])
+            tasks = sorted(tasks, key=lambda x: (x["start_time"], 0 if x["type"] == "free" else 1))
             number_of_execution = np.max([np.array(task["after"]) + np.array(task["number_executions"]) for task in tasks], axis=0)
             from tqdm import tqdm
-            for i in tqdm(range(number_of_execution[other_direction])):
-                for j in range(number_of_execution[raster_direction]):
-                    t = cycle_time*j + cycle_time*i*number_of_execution[raster_direction]
-                    index = np.array([i, j]) if other_direction == 0 else np.array([j, i])
-                    for task in tasks:
-                        time = t + task["start_time"]
-                        print(f"time: {time} i: {i} j:{j}")
-                        after = np.array(task["after"])
-                        number_execution = np.array(task["number_executions"])
-                        before = after + number_execution
-                        if np.all(after <= index) and np.all(index < before):
-                            index = index*np.array(task["repetition"]) + np.array(task["repetition-instance"])
-                            if task["type"] == "transfer":
-                                if task["layer-operator"] == "I":
-                                    cn = self.computation_nodes[(task["layer-target"], tuple(index))]
-                                    core = self.accelerator.get_core(cn.chosen_core_allocation)
-                                    self.vm.copy_tensor(offchip, core, cn.operand_tensors[LayerOperand("I")], time, task["execution_time"])
-                                    offset += task["execution_time"]
-                                if task["layer-operator"] == "O":
-                                    print(f"transfering O")
-                                    cn1 = self.computation_nodes[(task["layer-source"], tuple(index))]
-                                    core1 = self.accelerator.get_core(cn1.chosen_core_allocation)
-                                    if task["layer-target"] == None:
-                                        core2 = offchip
-                                    else:
-                                        cn2 = self.computation_nodes[(task["layer-target"], tuple(index))]
-                                        core2 = self.accelerator.get_core(cn2.chosen_core_allocation) 
-
-                                    self.vm.copy_tensor(core1, core2, cn1.operand_tensors[LayerOperand("O")], time, task["execution_time"])
-                                    offset += task["execution_time"]
-                            elif task["type"] == "compute":
-                                cn = self.computation_nodes[(task["layer"], tuple(index))]
+            for i in tqdm(range(number_of_execution)):
+                t = cycle_time*i + offset
+                for task in tasks:
+                    time = t + task["start_time"]
+                    after = np.array(task["after"])
+                    number_execution = np.array(task["number_executions"])
+                    before = after + number_execution
+                        
+                    if np.all(after <= i) and np.all(i < before):    
+                        if task["type"] == "transfer":
+                            if task["layer-operator"] == "I":
+                                cn = self.computation_nodes[(task["layer-target"], i - after)]
                                 core = self.accelerator.get_core(cn.chosen_core_allocation)
-                                self.vm.compute(core, cn, time, task["execution_time"], task["energy"])
-            
-                
+                                self.vm.copy_tensor(offchip, core, cn.operand_tensors[LayerOperand("I")], time, task["execution_time"])
+                            if task["layer-operator"] == "O":
+                                cn1 = self.computation_nodes[(task["layer-source"], i - after)]
+                                core1 = self.accelerator.get_core(cn1.chosen_core_allocation)
+                                if task["layer-target"] == None:
+                                    core2 = offchip
+                                else:
+                                    cn2 = self.computation_nodes[(task["layer-target"], i - after)]
+                                    core2 = self.accelerator.get_core(cn2.chosen_core_allocation) 
 
-        
+                                self.vm.copy_tensor(core1, core2, cn1.operand_tensors[LayerOperand("O")], time, task["execution_time"])
+                        elif task["type"] == "compute":
+                            cn = self.computation_nodes[(task["layer"], i - after)]
+                            print(cn)
+                            core = self.accelerator.get_core(cn.chosen_core_allocation)
+                            self.vm.compute(core, cn, time, task["execution_time"], task["energy"])
+                        elif task["type"] == "free":
+                            cn = self.computation_nodes[(task["layer"], i - after)]
+                            core = self.accelerator.get_core(task["core"])
+                            self.vm.free(core, cn.operand_tensors[LayerOperand(task["layer-operator"])], time)
 
-        
+            offset = t
 
-        energy = scme.energy
-        latency = scme.latency
+        energy = self.vm.energy
+        latency = self.vm.latency
+        scme.energy = self.vm.energy
+        scme.latency = self.vm.latency
         if not return_scme:
             return energy, latency
         return energy, latency, scme
@@ -137,45 +139,38 @@ class ReplayFitnessEvaluator(FitnessEvaluator):
         Args:
             core_allocations (list): list of the node-core allocations
         """
-        for i, core_allocation in enumerate(core_allocations):
+        for node in self.workload:
+            core_allocation = self.core_allocation[node.name]
             core = self.accelerator.get_core(core_allocation)
-            (layer_id, group_id) = self.layer_groups_flexible[i]
-            # Find all nodes of this coarse id and set their core_allocation, energy and runtime
-            nodes = (
-                node
-                for node in self.workload.nodes()
-                if isinstance(node, ComputationNode) and node.id == layer_id and node.group == group_id
-            )
-            for node in nodes:
-                try:
-                    equivalent_unique_node = next((n for n in self.node_hw_performances.keys() if node == n))
-                except StopIteration:
-                    raise ValueError(f"The given node_hw_performances doesn't have run information for node={node}")
-                try:
-                    cme = self.node_hw_performances[equivalent_unique_node][core]
-                except KeyError:
-                    raise KeyError(
-                        f"The given node_hw_performances doesn't have information for core_allocation={core_allocation} of node={node}"
-                    )
-                onchip_energy = cme.energy_total  # Initialize on-chip energy as total energy
-                latency = cme.latency_total1
-                too_large_operands = get_too_large_operands(cme, self.accelerator, core_id=core_allocation)
-                # If there is a too_large_operand, we separate the off-chip energy.
-                offchip_energy = 0
-                for too_large_operand in too_large_operands:
-                    layer_operand = next(
-                        (k for (k, v) in cme.layer.memory_operand_links.data.items() if v == too_large_operand)
-                    )
-                    layer_operand_offchip_energy = cme.mem_energy_breakdown[layer_operand][-1]
-                    offchip_energy += layer_operand_offchip_energy
-                    onchip_energy -= layer_operand_offchip_energy
+            try:
+                equivalent_unique_node = next((n for n in self.node_hw_performances.keys() if node == n))
+            except StopIteration:
+                raise ValueError(f"The given node_hw_performances doesn't have run information for node={node}")
+            try:
+                cme = self.node_hw_performances[equivalent_unique_node][core]
+            except KeyError:
+                raise KeyError(
+                    f"The given node_hw_performances doesn't have information for core_allocation={core_allocation} of node={node}"
+                )
+            onchip_energy = cme.energy_total  # Initialize on-chip energy as total energy
+            latency = cme.latency_total1
+            too_large_operands = get_too_large_operands(cme, self.accelerator, core_id=core_allocation)
+            # If there is a too_large_operand, we separate the off-chip energy.
+            offchip_energy = 0
+            for too_large_operand in too_large_operands:
+                layer_operand = next(
+                    (k for (k, v) in cme.layer.memory_operand_links.data.items() if v == too_large_operand)
+                )
+                layer_operand_offchip_energy = cme.mem_energy_breakdown[layer_operand][-1]
+                offchip_energy += layer_operand_offchip_energy
+                onchip_energy -= layer_operand_offchip_energy
                 # If there was offchip memory added for too_large_operands, get the offchip bandwidth
-                offchip_core = self.accelerator.get_core(self.accelerator.offchip_core_id)
-                offchip_instance = next(v for k, v in offchip_core.mem_hierarchy_dict.items())[-1].memory_instance
-                offchip_bw = cme.get_total_inst_bandwidth(offchip_instance)
-                node.set_onchip_energy(onchip_energy)
-                node.set_offchip_energy(offchip_energy)
-                node.set_runtime(latency)
-                node.set_chosen_core_allocation(core_allocation)
-                node.set_too_large_operands(too_large_operands)
-                node.set_offchip_bandwidth(offchip_bw)
+            offchip_core = self.accelerator.get_core(self.accelerator.offchip_core_id)
+            offchip_instance = next(v for k, v in offchip_core.mem_hierarchy_dict.items())[-1].memory_instance
+            offchip_bw = cme.get_total_inst_bandwidth(offchip_instance)
+            node.set_onchip_energy(onchip_energy)
+            node.set_offchip_energy(offchip_energy)
+            node.set_runtime(latency)
+            node.set_chosen_core_allocation(core_allocation)
+            node.set_too_large_operands(too_large_operands)
+            node.set_offchip_bandwidth(offchip_bw)

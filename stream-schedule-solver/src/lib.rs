@@ -5,15 +5,17 @@
 
 mod no_send;
 
-use std::borrow::Cow;
 use std::collections::BTreeMap;
+use std::io::Write;
+use std::{borrow::Cow, collections::BTreeSet};
 
-use grb::attribute::VarDoubleAttr::Obj;
-use mdsdf::{py::PySdf2D, vector::Vector};
-use mdsdf::{Channel, ChannelIndex, HsdfChannel, Mdsdf};
+use mdsdf::{
+    py::{PySdf, Sdf1D, Sdf2D, Sdf3D},
+    vector::Vector,
+};
+use mdsdf::{Channel, ChannelIndex, Mdsdf};
 use milp_formulation::{ExecutionTimeT, MilpFormulation, NameT};
 use no_send::NoSend;
-use ordered_float::OrderedFloat;
 use pyo3::prelude::*;
 use pyo3::types::{PyDict, PyString};
 
@@ -21,9 +23,9 @@ struct Name {
     names: Vec<String>,
 }
 
-impl NameT<2> for Name {
-    fn name(&self, actor: (usize, Vector<2, usize>)) -> String {
-        format!("{}({},{})", self.names[actor.0], actor.1[0], actor.1[1])
+impl NameT<1> for Name {
+    fn name(&self, actor: (usize, Vector<1, usize>)) -> String {
+        format!("{}({})", self.names[actor.0], actor.1[0])
     }
 }
 
@@ -31,8 +33,8 @@ struct ExecutionTime {
     execution_times: Vec<usize>,
 }
 
-impl ExecutionTimeT<2> for ExecutionTime {
-    fn execution_time(&self, actor: (usize, Vector<2, usize>)) -> usize {
+impl ExecutionTimeT<1> for ExecutionTime {
+    fn execution_time(&self, actor: (usize, Vector<1, usize>)) -> usize {
         self.execution_times[actor.0]
     }
 }
@@ -75,10 +77,15 @@ impl FromPyObject<'_> for OptimizationDirection {
 
 struct MilpData {
     optimization_direction: OptimizationDirection,
-    milp: MilpFormulation<'static, 2, ExecutionTime, Name>,
-    buffers: Vec<Option<(grb::Var, usize)>>,
+    milp: MilpFormulation<'static, 1, ExecutionTime, Name>,
+    buffers: BTreeMap<usize, BufferedInformation>,
     memory_occupancy: Vec<grb::Expr>,
-    processor: Vec<usize>,
+    tasks_in_processor: Vec<BTreeSet<usize>>,
+}
+
+struct BufferedInformation {
+    variable_buffer: grb::Var,
+    free_actor: usize,
 }
 
 impl MilpData {
@@ -91,10 +98,13 @@ impl MilpData {
         token_size_fn: Bound<'py, PyAny>,
         padding_fn: Bound<'py, PyAny>,
         memory_id_fn: Bound<'py, PyAny>,
-        processor_fn: Bound<'py, PyAny>,
-        sdf: &PySdf2D,
-    ) -> PyResult<NoSend<Self>> {
-        let mut id_map = sdf
+        processors: Vec<Bound<'py, PyAny>>,
+        uses_processor_fn: Bound<'py, PyAny>,
+        generate_free_fn: Bound<'py, PyAny>,
+        pysdf: &Sdf1D,
+    ) -> PyResult<(NoSend<Self>, Vec<Py<PyAny>>)> {
+        let mut id_map = pysdf
+            .0
             .id_map
             .bind(py)
             .iter()
@@ -104,8 +114,33 @@ impl MilpData {
         id_map.sort_by_key(|(i, _)| *i);
 
         debug_assert!(id_map.iter().enumerate().all(|(i, (j, _))| i == *j));
+        let mut id_map = id_map.into_iter().map(|(_, e)| e).collect::<Vec<_>>();
 
-        let id_map = id_map.into_iter().map(|(_, e)| e).collect::<Vec<_>>();
+        let mut sdf: Mdsdf<1> = pysdf.0.sdf.clone();
+        let n_actors = sdf.n_actors();
+        let channels = sdf.channels.iter().map(Clone::clone).collect::<Vec<_>>();
+
+        let mut free_channels = Vec::new();
+
+        for i in 0..n_actors {
+            let free_actor = sdf.add_actor();
+            let process = generate_free_fn.call((&id_map[i],), None)?;
+            let pr = channels
+                .iter()
+                .filter(|c| c.source == i)
+                .map(|c| c.production_rate)
+                .next()
+                .unwrap_or([1].into());
+            free_channels.push(sdf.add_channel(Channel {
+                production_rate: pr,
+                consumption_rate: pr,
+                source: i,
+                target: free_actor,
+                initial_tokens: [0].into(),
+            }));
+            id_map.push(process)
+        }
+
         let names = id_map
             .iter()
             .map(|e| name_fn.call((e,), None)?.extract())
@@ -116,11 +151,25 @@ impl MilpData {
             .map(|e| execution_time_fn.call((e,), None)?.extract())
             .try_collect::<Vec<usize>>()
             .expect("\"execution_times\" function must return int");
-        let processor = id_map
+        let tasks_in_processor = processors
             .iter()
-            .map(|e| processor_fn.call((e,), None)?.extract())
-            .try_collect::<Vec<usize>>()
-            .expect("\"processor\" function must return int");
+            .enumerate()
+            .map(|(pi, processor)| {
+                id_map
+                    .iter()
+                    .enumerate()
+                    .filter_map(|(j, task)| {
+                        match uses_processor_fn.call((processor, task), None) {
+                            Ok(e) => e,
+                            Err(e) => return Some(Err(e)),
+                        }
+                        .extract::<'_, bool>()
+                        .expect("uses_processor_fn should return bool")
+                        .then_some(Ok(j))
+                    })
+                    .try_collect::<BTreeSet<usize>>()
+            })
+            .try_collect::<Vec<_>>()?;
 
         let padding = id_map
             .iter()
@@ -128,39 +177,91 @@ impl MilpData {
             .try_collect::<Vec<[usize; 2]>>()
             .expect("\"processor\" function must return int");
 
+        debug_assert!(id_map.len() == names.len());
+        debug_assert!(id_map.len() == execution_times.len());
+        debug_assert!(id_map.len() == padding.len());
+
+        #[derive(Clone)]
         struct BufferInfo {
             core: usize,
             token_size: usize,
-            out_channels: Vec<ChannelIndex>,
+            minimum_kernel_size: usize,
+            free_actor: usize,
+            free_channel: ChannelIndex,
         }
 
-        let mut buffer_info: Vec<Option<BufferInfo>> =
-            (0..sdf.sdf.n_actors).map(|_| None).collect();
-        for (i, Channel { source, .. }) in sdf.sdf.channels.iter().enumerate() {
-            let info = &mut buffer_info[*source];
-            if let Some(BufferInfo { out_channels, .. }) = info {
-                out_channels.push(ChannelIndex(i));
+        let mut buffer_info: Vec<Option<BufferInfo>> = (0..n_actors).map(|_| None).collect();
+        for channel in channels.iter() {
+            let info = &mut buffer_info[channel.source];
+            let BufferInfo {
+                free_actor,
+                minimum_kernel_size,
+                ..
+            } = if let Some(buffer_info) = info {
+                buffer_info
             } else {
-                let core = memory_id_fn.call((&id_map[*source],), None)?.extract()?;
+                let core: Option<usize> = memory_id_fn
+                    .call((&id_map[channel.source],), None)?
+                    .extract()?;
+
+                let Some(core) = core else {
+                    continue
+                };
+
+                let free_actor = channel.source + n_actors;
+                id_map.push(generate_free_fn.call((&id_map[channel.source],), None)?);
+                let free_channel: ChannelIndex = free_channels[channel.source];
 
                 let token_size = token_size_fn
-                    .call((&id_map[*source],), None)?
+                    .call((&id_map[channel.source],), None)?
                     .extract()
                     .expect("token_size did not return int");
 
                 *info = Some(BufferInfo {
                     core,
                     token_size,
-                    out_channels: vec![ChannelIndex(i)],
+                    free_actor,
+                    free_channel,
+                    minimum_kernel_size: 0,
                 });
-            }
+                info.as_mut().unwrap()
+            };
+            sdf.add_channel(Channel {
+                production_rate: channel.consumption_rate,
+                consumption_rate: channel.production_rate,
+                source: channel.target,
+                target: *free_actor,
+                initial_tokens: [
+                    -(padding[channel.target][optimization_direction.dimension()] as isize),
+                ]
+                .into(),
+            });
         }
+
+        let e = Sdf1D(PySdf {
+            id_map: PyDict::from_sequence_bound(
+                id_map
+                    .iter()
+                    .map(Clone::clone)
+                    .enumerate()
+                    .map(|(i, e)| (e, i))
+                    .collect::<Vec<(_, _)>>()
+                    .into_py(py)
+                    .bind(py),
+            )
+            .unwrap()
+            .unbind(),
+            sdf: sdf.clone(),
+        });
+
+        let mut f = std::fs::File::create("test.dot").unwrap();
+        f.write_fmt(format_args!("{}", e.dot(py).unwrap())).unwrap();
+        drop(f);
 
         let result = NoSend::new({
             use grb::prelude::*;
-            let sdf: Mdsdf<2> = sdf.sdf.clone();
             move || {
-                let mut milp = MilpFormulation::<'static, 2, ExecutionTime, Name>::new(
+                let mut milp = MilpFormulation::<'static, 1, ExecutionTime, Name>::new(
                     Cow::Owned(sdf.into_hsdf()),
                     ExecutionTime { execution_times },
                     Name {
@@ -173,91 +274,53 @@ impl MilpData {
                     .map(|_| grb::Expr::from(0))
                     .collect::<Vec<_>>();
 
-                let channels = buffered.milp.hsdf.mdsdf.channels.clone();
                 let buffers = buffer_info
-                    .into_iter()
+                    .iter()
+                    .map(Clone::clone)
                     .enumerate()
-                    .map(|(source, info)| {
+                    .filter_map(|(source, info)| {
                         let Some(BufferInfo {
                             core,
                             token_size,
-                            out_channels,
+                            free_channel,
+                            free_actor,
+                            ..
                         }) = info
                         else {
                             return None;
                         };
-
-                        let minimum_buffer = out_channels
-                            .iter()
-                            .map(|ChannelIndex(i)| {
-                                let Channel {
-                                    production_rate,
-                                    consumption_rate,
-                                    initial_tokens,
-                                    target,
-                                    ..
-                                } = channels[*i];
-                                let production_rate = production_rate
-                                    [optimization_direction.other_dimension()]
-                                    as isize;
-                                let consumption_rate = consumption_rate
-                                    [optimization_direction.other_dimension()]
-                                    as isize;
-                                let initial_tokens = initial_tokens
-                                    [optimization_direction.other_dimension()]
-                                    as isize;
-                                let divisor = num::integer::gcd(production_rate, consumption_rate);
-                                consumption_rate - divisor + production_rate
-                                    - (initial_tokens.div_floor(production_rate)) * production_rate
-                                    + padding[target][optimization_direction.other_dimension()] as isize
-                            })
-                            .chain(std::iter::once(0))
-                            .max()
-                            .expect("This should not be none")
-                            as usize;
-                        println!("minimum_buffer {} {}", &names[source], minimum_buffer);
                         let name = format!("{}_buffer_size", &names[source]);
                         let model = &mut buffered.milp.model;
                         let buffer_size =
                             grb::add_ctsvar!(model, name: &format!("{name}"), bounds: 0..).unwrap();
-                        memory_occupancy[core] = memory_occupancy[core].clone()
-                            + buffer_size.clone() * token_size * minimum_buffer;
+                        memory_occupancy[core] =
+                            memory_occupancy[core].clone() + buffer_size.clone() * token_size;
 
-                        for channel_index in out_channels {
-                            let target = buffered.milp.hsdf.mdsdf.channels[channel_index.0].target;
+                        buffered
+                            .add_buffer(free_channel, [Expr::from(buffer_size)].into(), &name)
+                            .unwrap();
 
-                            buffered
-                                .add_buffer(
-                                    channel_index,
-                                    match optimization_direction {
-                                        OptimizationDirection::X => {
-                                            [Expr::from(buffer_size - padding[target][0]), (minimum_buffer - padding[target][1]).into()]
-                                        }
-                                        OptimizationDirection::Y => {
-                                            [(minimum_buffer - padding[target][0]).into(), (buffer_size - padding[target][1]).into()]
-                                        }
-                                    }
-                                    .into(),
-                                    &name,
-                                )
-                                .unwrap();
-                        }
-
-                        Some((buffer_size, minimum_buffer))
+                        Some((
+                            source,
+                            BufferedInformation {
+                                variable_buffer: buffer_size,
+                                free_actor,
+                            },
+                        ))
                     })
-                    .collect::<Vec<_>>();
+                    .collect::<BTreeMap<_, _>>();
 
                 MilpData {
                     milp,
                     optimization_direction,
                     buffers,
                     memory_occupancy,
-                    processor,
+                    tasks_in_processor,
                 }
             }
         });
 
-        Ok(result)
+        Ok((result, id_map.into_iter().map(|e| e.into()).collect()))
     }
 }
 
@@ -265,9 +328,9 @@ impl MilpData {
 #[derive(Default, Debug, Clone)]
 struct ExecutionInformation {
     start_time: usize,
-    start_after: [isize; 2],
-    repetition: [usize; 2],
-    buffer_size: [usize; 2],
+    start_after: isize,
+    repetition: usize,
+    buffer_size: usize,
 }
 
 #[pymethods]
@@ -276,22 +339,22 @@ impl ExecutionInformation {
         self.start_time
     }
 
-    fn start_after(&self) -> (isize, isize) {
-        (self.start_after[0], self.start_after[1])
+    fn start_after(&self) -> isize {
+        self.start_after
     }
 
-    fn repetition(&self) -> (usize, usize) {
-        (self.repetition[0], self.repetition[1])
+    fn repetition(&self) -> usize {
+        self.repetition
     }
 
-    fn buffer_size(&self) -> (usize, usize) {
-        (self.buffer_size[0], self.buffer_size[1])
+    fn buffer_size(&self) -> usize {
+        self.buffer_size
     }
 }
 
 #[pyclass]
 struct Optimizer {
-    id_map: Py<PyDict>,
+    id_map: Vec<Py<PyAny>>,
     milp: NoSend<MilpData>,
 }
 
@@ -307,24 +370,26 @@ impl Optimizer {
         token_size_fn: Bound<'py, PyAny>,
         padding_fn: Bound<'py, PyAny>,
         memory_id_fn: Bound<'py, PyAny>,
-        processor_fn: Bound<'py, PyAny>,
-        sdf: &PySdf2D,
+        processors: Vec<Bound<'py, PyAny>>,
+        uses_processor_fn: Bound<'py, PyAny>,
+        generate_free_fn: Bound<'py, PyAny>,
+        sdf: &Sdf1D,
     ) -> PyResult<Self> {
-        Ok(Optimizer {
-            id_map: sdf.id_map.clone(),
-            milp: MilpData::new(
-                py,
-                optimization_direction,
-                memory_sizes,
-                name_fn,
-                execution_time_fn,
-                token_size_fn,
-                padding_fn,
-                memory_id_fn,
-                processor_fn,
-                sdf,
-            )?,
-        })
+        let (milp, id_map) = MilpData::new(
+            py,
+            optimization_direction,
+            memory_sizes,
+            name_fn,
+            execution_time_fn,
+            token_size_fn,
+            padding_fn,
+            memory_id_fn,
+            processors,
+            uses_processor_fn,
+            generate_free_fn,
+            sdf,
+        )?;
+        Ok(Optimizer { id_map, milp })
     }
 
     /**
@@ -333,175 +398,122 @@ impl Optimizer {
      */
     fn optimize<'py>(
         &self,
-        py: Python<'py>,
     ) -> PyResult<(
         usize,
-        Vec<((Bound<'py, PyAny>, (usize, usize)), ExecutionInformation)>,
-        usize,
+        Vec<((Py<PyAny>, usize), ExecutionInformation)>,
     )> {
         use grb::prelude::*;
-        let (throuput, start_information, memory) = self.milp.with(
+        let (throuput, start_information) = self.milp.with(
             move |MilpData {
                       ref mut milp,
-                      optimization_direction,
                       memory_occupancy,
                       buffers,
-                      processor,
+                      tasks_in_processor,
                       ..
                   }| {
-
                 cyclic_scheduler::cyclic_scheduler(
                     milp,
-                    |(i, _)| processor[i],
-                    optimization_direction.dimension(),
+                    tasks_in_processor.len(),
+                    |(i, _), p| tasks_in_processor[p].contains(&i),
+                    0,
                 )
                 .unwrap();
 
                 milp.model
-                    .set_objective(
-                        milp.throughputs[optimization_direction.dimension()],
-                        ModelSense::Maximize,
-                    )
+                    .set_objective(milp.throughputs[0], ModelSense::Maximize)
                     .unwrap();
-                
-                milp.model.write("f.lp").unwrap();
+
+                milp.model.write("test.lp").unwrap();
 
                 milp.model.optimize().unwrap();
 
-                let throuput1 = milp
+                let throuput = milp
                     .model
-                    .get_obj_attr(
-                        attr::X,
-                        &milp.throughputs[optimization_direction.dimension()],
-                    )
+                    .get_obj_attr(attr::X, &milp.throughputs[0])
                     .unwrap();
 
-                assert!(throuput1 > 1e-7); //No deadlock
+                assert!(throuput > 1e-7); //No deadlock
                 assert_eq!(milp.model.status().unwrap(), Status::Optimal);
 
                 milp.model
-                    .add_constr(
-                        "t",
-                        c!(milp.throughputs[optimization_direction.dimension()] >= throuput1),
-                    )
+                    .add_constr("contrain_throuput", c!(milp.throughputs[0] >= throuput))
                     .unwrap();
 
-                milp.model
-                    .set_objective(
-                        milp.throughputs[optimization_direction.other_dimension()],
-                        ModelSense::Maximize,
-                    )
-                    .unwrap();
-                milp.model.optimize().unwrap();
-
-                let throuput2 = milp
-                    .model
-                    .get_obj_attr(
-                        attr::X,
-                        &milp.throughputs[optimization_direction.other_dimension()],
-                    )
-                    .unwrap();
-
-                assert!(throuput2 > 1e-7); //No deadlock
-                assert_eq!(milp.model.status().unwrap(), Status::Optimal);
-
-                milp.model
-                    .add_constr(
-                        "t",
-                        c!(milp.throughputs[optimization_direction.other_dimension()] >= throuput2),
-                    )
+                let u = milp
+                    .u
+                    .iter()
+                    .map(|(k, v)| {
+                        grb::Result::Ok((k.clone(), milp.model.get_obj_attr(attr::X, v)?))
+                    })
+                    .try_collect::<BTreeMap<_, _>>()
                     .unwrap();
 
                 let model = &mut milp.model;
-                let max_memory = add_ctsvar!(model, name: "max_memory", bounds: 0..).unwrap();
+                let mut memory_sum = Expr::from(0);
 
                 for (i, m) in memory_occupancy.iter().enumerate() {
-                    milp.model
-                        .add_constr(&format!("max_memory_{i}"), c!(max_memory >= m.clone()))
-                        .unwrap();
+                    memory_sum = memory_sum + m.clone();
                 }
 
                 milp.model
-                    .set_objective(max_memory, ModelSense::Minimize)
+                    .set_objective(memory_sum, ModelSense::Minimize)
                     .unwrap();
                 milp.model.optimize().unwrap();
 
-                milp.model.write("f.sol").unwrap();
-
                 let mut execution_information = BTreeMap::new();
-                for ((k, v), buffer_size) in milp.u.iter().zip(buffers) {
+                for (k, _) in milp.u.iter() {
+                    let buffer_size = buffers.get(&k.0);
                     let buffer_size = buffer_size
-                        .map(|(variable_size, minimum_size)| {
-                            (
-                                milp.model
-                                    .get_obj_attr(attr::X, &variable_size)
-                                    .unwrap()
-                                    .floor() as usize,
-                                minimum_size,
-                            )
-                        })
                         .map(
-                            |(variable_size, minimum_size)| match optimization_direction {
-                                OptimizationDirection::X => [variable_size, minimum_size],
-                                OptimizationDirection::Y => [minimum_size, variable_size],
+                            |BufferedInformation {
+                                 variable_buffer,
+                                 free_actor,
+                             }| {
+                                milp.model
+                                    .get_obj_attr(attr::X, &variable_buffer)
+                                    .unwrap()
+                                    .floor() as usize
                             },
                         )
-                        .unwrap_or([0, 0]);
+                        .unwrap_or(0usize);
 
-                    let u = milp.model.get_obj_attr(attr::X, v).unwrap();
-                    execution_information.insert(*k, ExecutionInformation {
-                        start_time: ((u % 1.0) * throuput1).round() as usize,
-                        start_after: match optimization_direction {
-                            OptimizationDirection::X => [u.floor() as isize, u.floor() as isize],
-                            OptimizationDirection::Y => [u.floor() as isize, u.floor() as isize],
+                    execution_information.insert(
+                        *k,
+                        ExecutionInformation {
+                            start_time: ((u.get(k).unwrap() % 1.0) / throuput).round() as usize,
+                            start_after: u.get(k).unwrap().floor() as isize,
+                            repetition: milp.hsdf.repetition_vector[k.0][0],
+                            buffer_size,
                         },
-                        repetition: [
-                            milp.hsdf.repetition_vector[k.0][0],
-                            milp.hsdf.repetition_vector[k.0][1]
-                        ],
-                        buffer_size
-                    });
+                    );
                 }
 
                 assert_eq!(milp.model.status().unwrap(), Status::Optimal);
-
-                let memory = milp.model.get_obj_attr(attr::X, &max_memory).unwrap();
-                milp.model
-                    .add_constr("memory_constraint", c!(max_memory >= memory))
-                    .unwrap();
 
                 //model.write("formulation.lp").unwrap();
                 //model.write("formulation.sol").unwrap();
 
-                (throuput1, execution_information, memory)
+                (throuput, execution_information)
             },
         );
-        let mut id_map = self
-            .id_map
-            .bind(py)
-            .iter()
-            .map(|(a, b)| PyResult::Ok((b.extract()?, a)))
-            .try_collect::<Vec<(usize, Bound<'py, PyAny>)>>()?;
-        id_map.sort_by_key(|(i, _)| *i);
-        let id_map = id_map.into_iter().map(|(_, e)| e).collect::<Vec<_>>();
 
         let cycle_time = (1.0 / throuput).round() as usize;
         let mut start_information: Vec<_> = start_information
             .into_iter()
-            .map(|((i, j), e)| PyResult::Ok(((id_map[i].clone(), (j[0], j[1])), e)))
+            .map(|((i, j), e)| PyResult::Ok(((self.id_map[i].clone(), j[0]), e)))
             .try_collect()?;
         start_information.sort_by_key(|(_, s)| s.start_time);
 
-        println!("Start Information: {:?}", start_information);
-
-        Ok((cycle_time, start_information, memory.round() as usize))
+        Ok((cycle_time, start_information))
     }
 }
 
 #[pymodule]
 fn stream_schedule_solver(m: &Bound<'_, PyModule>) -> PyResult<()> {
     m.add_class::<Optimizer>()?;
-    m.add_class::<PySdf2D>()?;
+    m.add_class::<Sdf1D>()?;
+    m.add_class::<Sdf2D>()?;
+    m.add_class::<Sdf3D>()?;
 
     Ok(())
 }

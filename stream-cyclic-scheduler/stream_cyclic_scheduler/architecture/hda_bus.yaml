@@ -1,0 +1,13 @@
+name: hda_bus
+cores:
+  # index corresponds to core ID
+  - ./core_a.yaml
+  - ./core_b.yaml
+  - ./core_c.yaml
+  - ./offchip.yaml
+
+graph:
+  type: bus
+  bandwidth: 32
+  unit_energy_cost: 0
+  offchip_core_id: 3

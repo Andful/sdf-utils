@@ -23,7 +23,7 @@ pub struct ChannelIndex(pub usize);
 
 #[derive(Debug, Clone, Default)]
 pub struct Mdsdf<const N: usize> {
-    pub n_actors: usize,
+    n_actors: usize,
     pub channels: Vec<Channel<N>>,
 }
 
@@ -35,6 +35,16 @@ impl<const N: usize> Mdsdf<N> {
         }
     }
 
+    pub fn n_actors(&self) -> usize {
+        self.n_actors
+    }
+
+    pub fn add_actor(&mut self) -> usize {
+        let result = self.n_actors;
+        self.n_actors += 1;
+        result
+    }
+
     pub fn add_channel(&mut self, channel: Channel<N>) -> ChannelIndex {
         debug_assert!(channel.source < self.n_actors);
         debug_assert!(channel.target < self.n_actors);
@@ -44,7 +54,10 @@ impl<const N: usize> Mdsdf<N> {
     }
 
     pub fn out_channels(&self, actor: usize) -> impl Iterator<Item = Channel<N>> + '_ {
-        self.channels.iter().filter(move |c| c.source == actor).map(Clone::clone)
+        self.channels
+            .iter()
+            .filter(move |c| c.source == actor)
+            .map(Clone::clone)
     }
 
     pub fn get_channel(&self, ChannelIndex(i): ChannelIndex) -> &Channel<N> {
@@ -116,8 +129,16 @@ impl<const N: usize> Hsdf<'_, N> {
         HsdfChannels::new(self, channels)
     }
 
-    pub fn out_channels_from_sdf_actor(&self, actor: usize) -> HsdfChannels<'_, N, impl Iterator<Item = Channel<N>> + '_> {
-        let channels = self.mdsdf.channels.iter().filter(move |c| c.source == actor).map(Clone::clone);
+    pub fn out_channels_from_sdf_actor(
+        &self,
+        actor: usize,
+    ) -> HsdfChannels<'_, N, impl Iterator<Item = Channel<N>> + '_> {
+        let channels = self
+            .mdsdf
+            .channels
+            .iter()
+            .filter(move |c| c.source == actor)
+            .map(Clone::clone);
         HsdfChannels::new(self, channels)
     }
 }

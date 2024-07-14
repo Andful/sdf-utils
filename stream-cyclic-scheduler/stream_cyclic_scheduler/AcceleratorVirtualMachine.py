@@ -3,7 +3,7 @@ from stream.classes.hardware.architecture.noc.communication_link import Communic
 from stream.classes.cost_model.communication_manager import CommunicationLinkEvent
 from stream.classes.workload.tensor import Tensor
 from stream.classes.workload.computation_node import ComputationNode
-from zigzag.datatypes import LayerDim, LayerOperand
+from zigzag.datatypes import LayerDim, LayerOperand, MemoryOperand
 from zigzag.workload.Workload import Workload
 from logging import info, warning
 from typing import Dict, cast
@@ -38,7 +38,7 @@ class AcceleratorVirtualMachine:
             if n.name not in stack_layers:
                 continue
             for op, tensor in n.operand_tensors.items():
-                if tensor.layer_operand == LayerOperand("W"):
+                if tensor.layer_operand == LayerOperand("W") and MemoryOperand("I2") not in n.too_large_operands:
                     # Move tensor
                     core_id = n.chosen_core_allocation
                     if (core_id, tensor) in self.loaded_weights:
@@ -62,15 +62,17 @@ class AcceleratorVirtualMachine:
         duration2 = ceil(tensor.size / link.bandwidth)
         assert duration == duration2
         energy = link.unit_energy_cost*duration
-        link.transfer(
-            CommunicationLinkEvent(
-                "transfer",
-                start=start,
-                end=start + duration,
-                tensors=[tensor],
-                energy=energy
+        for link in links:
+            link.transfer(
+                CommunicationLinkEvent(
+                    "transfer",
+                    start=start,
+                    end=start + duration,
+                    tensors=[tensor],
+                    energy=energy
+                )
             )
-        )
+
         self.energy += energy
 
         self.energy += self.accelerator.get_memory_energy_cost_of_transfer(
@@ -98,7 +100,7 @@ class AcceleratorVirtualMachine:
         top_instance = self.accelerator.get_top_instance_of_core(
             core, memory_op)
         if not self.accelerator.memory_manager.contains(tensor, top_instance):
-            info(f"WARNING: no {tensor} in {core} {top_instance}")
+            warning(f"no {tensor} in {core} {top_instance}")
         self.accelerator.memory_manager.remove_tensor_from_top_instance(
             top_instance,
             tensor,
@@ -106,17 +108,26 @@ class AcceleratorVirtualMachine:
         )
 
     def compute(self, core: Core, cn: ComputationNode, start: int, duration: int, energy: int):
-        info(f"Executing {cn.name} at {start} producing {
+        info(f"Executing {cn.name}({cn.sub_id}) at {start} producing {
              cn.operand_tensors[LayerOperand('O')]} in {core}")
         out_tensor = cn.operand_tensors[LayerOperand('O')]
-        print(f"computed {out_tensor}")
+        if MemoryOperand("O") not in cn.too_large_operands:
+            self.accelerator.memory_manager.add_tensor_to_core(
+                tensor=out_tensor,
+                core=core,
+                timestep=start,
+                timestep_end=start + duration,
+            )
+            
 
-        self.accelerator.memory_manager.add_tensor_to_core(
-            tensor=out_tensor,
-            core=core,
-            timestep=start,
-            timestep_end=start + duration,
-        )
+        if len(cn.too_large_operands) != 0:
+            self.accelerator.block_offchip_links(
+                cn.too_large_operands,
+                core.id,
+                start,
+                duration,
+                cn,
+            )
 
         cn.chosen_core_allocation = core.id
         cn.start = start
